@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🔒 Login | BaitBox Cyber Command Center</title>
+  <meta name="description" content="Secure login to the BaitBox Cyber Command Center.">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;600;700;800;900&display=swap" rel="stylesheet">
+
+  <style>
+    /* ═══════════════════════════════════════════════════════════════════════
+       DESIGN TOKENS
+     ═══════════════════════════════════════════════════════════════════════ */
+    :root {
+      --bg-base:       #020409;
+      --bg-surface:    #060c18;
+      --bg-card:       #0a1428;
+      --bg-card-hover: #0d1a34;
+      --border:        rgba(30, 80, 160, 0.25);
+      --border-bright: rgba(30, 80, 160, 0.6);
+
+      --text-primary:  #e8f0fe;
+      --text-secondary:#8ba3c9;
+      --text-muted:    #4a6080;
+
+      --green:   #00f5a0;
+      --green-d: rgba(0, 245, 160, 0.1);
+      --cyan:    #00d4ff;
+      --cyan-d:  rgba(0, 212, 255, 0.1);
+      --purple:  #b17aff;
+      --purple-d:rgba(177, 122, 255, 0.1);
+      --red:     #ff4d4d;
+      --red-d:   rgba(255, 77, 77, 0.1);
+      --amber:   #ffb347;
+
+      --font-sans: 'Outfit', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg-base);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ── Ambient Background Glows ── */
+    .glow-blob {
+      position: absolute;
+      width: 400px;
+      height: 400px;
+      border-radius: 50%;
+      filter: blur(120px);
+      z-index: 1;
+      opacity: 0.15;
+      pointer-events: none;
+    }
+    .glow-blob-1 {
+      top: -10%;
+      left: -10%;
+      background: var(--green);
+    }
+    .glow-blob-2 {
+      bottom: -10%;
+      right: -10%;
+      background: var(--purple);
+    }
+
+    /* ── Card Container ── */
+    .login-container {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      max-width: 420px;
+      padding: 20px;
+    }
+
+    .login-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+      box-shadow: 0 15px 35px rgba(0,0,0,0.6), 0 0 30px rgba(30, 80, 160, 0.05);
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .login-card:hover {
+      border-color: var(--border-bright);
+      box-shadow: 0 15px 35px rgba(0,0,0,0.7), 0 0 35px rgba(0, 212, 255, 0.1);
+    }
+
+    /* ── Logo & Title ── */
+    .logo-section {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    .logo-icon {
+      font-size: 42px;
+      display: inline-block;
+      margin-bottom: 12px;
+      filter: drop-shadow(0 0 12px var(--green));
+      animation: bob 3s ease-in-out infinite;
+    }
+    @keyframes bob {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+
+    .logo-text h1 {
+      font-size: 26px;
+      font-weight: 900;
+      letter-spacing: 6px;
+      background: linear-gradient(135deg, var(--green) 0%, var(--cyan) 60%, var(--purple) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 6px;
+    }
+    .logo-text p {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    /* ── Form Inputs ── */
+    .form-group {
+      margin-bottom: 20px;
+      position: relative;
+    }
+    .form-label {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .input-wrapper {
+      position: relative;
+    }
+    .input-field {
+      width: 100%;
+      background: rgba(6, 12, 24, 0.8);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      color: var(--text-primary);
+      transition: all 0.3s;
+      outline: none;
+    }
+    .input-field:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 10px rgba(0, 212, 255, 0.15);
+      background: var(--bg-base);
+    }
+
+    /* ── Button ── */
+    .submit-btn {
+      width: 100%;
+      background: linear-gradient(135deg, var(--cyan), var(--purple));
+      border: none;
+      color: #fff;
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-top: 10px;
+      text-transform: uppercase;
+      box-shadow: 0 4px 15px rgba(177, 122, 255, 0.2);
+    }
+    .submit-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0, 212, 255, 0.4);
+      filter: brightness(1.1);
+    }
+    .submit-btn:active {
+      transform: translateY(1px);
+    }
+
+    /* ── Error Box ── */
+    .error-box {
+      background: var(--red-d);
+      border: 1px solid rgba(255, 77, 77, 0.3);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      color: var(--red);
+      font-size: 12px;
+      margin-bottom: 20px;
+      font-family: var(--font-mono);
+      display: none;
+      align-items: center;
+      gap: 10px;
+      animation: shake 0.4s ease-in-out;
+    }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60% { transform: translateX(-4px); }
+      40%, 80% { transform: translateX(4px); }
+    }
+
+    /* ── Footer ── */
+    .login-footer {
+      text-align: center;
+      margin-top: 30px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 1px;
+      z-index: 2;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="glow-blob glow-blob-1"></div>
+  <div class="glow-blob glow-blob-2"></div>
+
+  <div class="login-container">
+    <div class="login-card">
+      <div class="logo-section">
+        <span class="logo-icon">🪤</span>
+        <div class="logo-text">
+          <h1>BAITBOX</h1>
+          <p>Cyber Decoy System v2.1</p>
+        </div>
+      </div>
+
+      <div class="error-box" id="error-box">
+        <span>⚠️</span> <span id="error-msg">Invalid credentials. Access Denied.</span>
+      </div>
+
+      <form id="login-form">
+        <div class="form-group">
+          <label class="form-label" for="username">Username</label>
+          <div class="input-wrapper">
+            <input class="input-field" type="text" id="username" name="username" required autocomplete="username" autofocus>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="password">Password</label>
+          <div class="input-wrapper">
+            <input class="input-field" type="password" id="password" name="password" required autocomplete="current-password">
+          </div>
+        </div>
+
+        <button type="submit" class="submit-btn" id="submit-btn">Authorize</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="login-footer">
+    BaitBox Honeypot System v2.1 — For authorized security research only.
+  </div>
+
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const usernameInput = document.getElementById('username');
+      const passwordInput = document.getElementById('password');
+      const submitBtn = document.getElementById('submit-btn');
+      const errorBox = document.getElementById('error-box');
+      const errorMsg = document.getElementById('error-msg');
+
+      errorBox.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Authenticating...';
+
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: new URLSearchParams({
+            username: usernameInput.value,
+            password: passwordInput.value
+          })
+        });
+
+        if (res.ok) {
+          // Redirect to the dashboard
+          window.location.href = '/';
+        } else {
+          let detail = 'Access denied. Please check your credentials.';
+          try {
+            const data = await res.json();
+            if (data && data.detail) detail = data.detail;
+          } catch(err) {}
+          
+          errorMsg.textContent = detail;
+          errorBox.style.display = 'flex';
+          passwordInput.value = '';
+          passwordInput.focus();
+        }
+      } catch (err) {
+        errorMsg.textContent = 'Network error. Please try again.';
+        errorBox.style.display = 'flex';
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Authorize';
+      }
+    });
+  </script>
+</body>
+</html>

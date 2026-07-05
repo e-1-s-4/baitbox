@@ -1,0 +1,59 @@
+# docker-compose.yml — BaitBox with PostgreSQL backend
+#
+# Usage:
+#   docker compose up -d          # start BaitBox + Postgres
+#   docker compose logs -f app    # tail honeypot logs
+#
+# To revert to SQLite (local dev), just run without compose:
+#   python -m baitbox.main
+#
+# Environment variables can be overridden via a .env file next to this file.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: baitbox
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "2222:2222"   # SSH honeypot
+      - "2323:2323"   # Telnet honeypot
+      - "8000:8000"   # Dashboard + HTTP honeypot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    environment:
+      # Switch to PostgreSQL backend
+      BAITBOX_DB_TYPE: postgresql
+      BAITBOX_DATABASE_URL: postgresql://postgres:postgres@db:5432/baitbox
+
+      # Dashboard auth — CHANGE THESE in production
+      BAITBOX_DASHBOARD_USER: admin
+      BAITBOX_DASHBOARD_PASSWORD: changeme
+      BAITBOX_JWT_SECRET: change-this-to-a-random-secret
+
+      # Optional: webhook alerts
+      # BAITBOX_WEBHOOK_URL: https://discord.com/api/webhooks/...
+      # BAITBOX_WEBHOOK_TYPE: discord
+
+volumes:
+  pgdata:
