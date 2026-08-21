@@ -706,8 +706,19 @@ async def honeypot(request: Request, path: str) -> Response:
         return Response(status_code=200)
 
     # .env file decoy - return fake env to entice credential harvesting bots
-    if request.url.path in ("/.env", "/env", "/.env.local"):
+    if request.url.path in ("/.env", "/env", "/.env.local", "/.env.production", "/.env.development", "/.env.staging"):
         return Response(_FAKE_ENV, media_type="text/plain", status_code=200)
+
+    # .aws/credentials decoy
+    if "/.aws/" in request.url.path:
+        return Response(
+            "[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
+            media_type="text/plain", status_code=200,
+        )
+
+    # .docker/config.json decoy
+    if "/.docker/" in request.url.path:
+        return JSONResponse({"auths": {"https://index.docker.io/v1/": {"auth": "YWRtaW46cHJvZF9kb2NrZXJfcGFzc185OTg4"}}}, status_code=200)
 
     # .git/config decoy
     if "/.git" in request.url.path:

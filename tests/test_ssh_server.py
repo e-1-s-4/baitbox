@@ -285,6 +285,41 @@ def test_unknown_command():
     assert b"command not found" in out
 
 
+def test_kill_commands():
+    s = SSHSession("x","1.2.3.4",22,"root",MagicMock(),MagicMock())
+    out, close = execute_session_command(s, "kill 1234")
+    assert out == b""
+    assert not close
+
+
+def test_wc_command():
+    s = SSHSession("x","1.2.3.4",22,"root",MagicMock(),MagicMock())
+    out, close = execute_session_command(s, "wc -l /etc/passwd")
+    assert b"/etc/passwd" in out
+
+
+def test_base64_command():
+    s = SSHSession("x","1.2.3.4",22,"root",MagicMock(),MagicMock())
+    out, close = execute_session_command(s, "base64 /etc/hostname")
+    assert len(out) > 0
+
+
+def test_checksum_commands():
+    s = SSHSession("x","1.2.3.4",22,"root",MagicMock(),MagicMock())
+    out1, _ = execute_session_command(s, "md5sum /etc/hostname")
+    assert b"/etc/hostname" in out1
+    out2, _ = execute_session_command(s, "sha256sum /etc/hostname")
+    assert b"/etc/hostname" in out2
+
+
+def test_awk_sed_nc():
+    s = SSHSession("x","1.2.3.4",22,"root",MagicMock(),MagicMock())
+    out, _ = execute_session_command(s, "awk '{print $1}' /etc/hostname")
+    assert b"web-prod-01" in out
+    out_nc, _ = execute_session_command(s, "nc -zv 10.0.0.1 80")
+    assert b"refused" in out_nc
+
+
 # ── make_prompt ────────────────────────────────────────────────────────────
 
 def test_make_prompt_root():
