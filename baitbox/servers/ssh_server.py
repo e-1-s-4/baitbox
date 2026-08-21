@@ -762,6 +762,79 @@ def execute_session_command(session: SSHSession, command: str) -> tuple[bytes, b
             return b"yum: missing command\r\n", False
         return b"", False  # Silent success for honeypot
 
+    if executable in {"kill", "pkill", "killall"}:
+        if not args:
+            return f"{executable}: usage error\r\n".encode(), False
+        return b"", False
+
+    if executable == "wc":
+        if not args:
+            return b"0 0 0\r\n", False
+        lines_only = "-l" in args or "--lines" in args
+        target = [a for a in args if not a.startswith("-")][-1] if any(not a.startswith("-") for a in args) else None
+        if target:
+            fpath = session.vfs._normalize_path(session.cwd, target)
+            content = session.vfs.read_file(fpath)
+            if content is None:
+                return f"wc: {target}: No such file or directory\r\n".encode(), False
+            lines = len(content.splitlines())
+            words = len(content.split())
+            bytes_cnt = len(content)
+            if lines_only:
+                return f"{lines} {target}\r\n".encode(), False
+            return f"{lines} {words} {bytes_cnt} {target}\r\n".encode(), False
+        return b"0 0 0\r\n", False
+
+    if executable == "base64":
+        import base64 as b64
+        decode_mode = "-d" in args or "--decode" in args
+        target = [a for a in args if not a.startswith("-")][-1] if any(not a.startswith("-") for a in args) else None
+        if target:
+            fpath = session.vfs._normalize_path(session.cwd, target)
+            content = session.vfs.read_file(fpath)
+            if content is None:
+                return f"base64: {target}: No such file or directory\r\n".encode(), False
+            if decode_mode:
+                try:
+                    return b64.b64decode(content.strip()) + b"\r\n", False
+                except Exception:
+                    return b"base64: invalid input\r\n", False
+            else:
+                return b64.b64encode(content) + b"\r\n", False
+        return b"", False
+
+    if executable in {"md5sum", "sha256sum"}:
+        import hashlib
+        target = [a for a in args if not a.startswith("-")][-1] if any(not a.startswith("-") for a in args) else None
+        if target:
+            fpath = session.vfs._normalize_path(session.cwd, target)
+            content = session.vfs.read_file(fpath)
+            if content is None:
+                return f"{executable}: {target}: No such file or directory\r\n".encode(), False
+            h = hashlib.md5(content).hexdigest() if executable == "md5sum" else hashlib.sha256(content).hexdigest()
+            return f"{h}  {target}\r\n".encode(), False
+        return b"", False
+
+    if executable in {"awk", "sed"}:
+        if not args:
+            return f"{executable}: missing script/file operand\r\n".encode(), False
+        target = args[-1] if not args[-1].startswith("-") else None
+        if target:
+            fpath = session.vfs._normalize_path(session.cwd, target)
+            content = session.vfs.read_file(fpath)
+            if content is not None:
+                return content.replace(b"\n", b"\r\n"), False
+        return b"", False
+
+    if executable in {"nc", "netcat", "ncat", "socat"}:
+        return b"Ncat: Connection refused.\r\n", False
+
+    if executable == "service":
+        if len(args) >= 2 and args[1] == "status":
+            svc = args[0]
+            return f"● {svc}.service - {svc.capitalize()} Service\r\n   Active: active (running)\r\n".encode(), False
+        return b"", False
+
     # Script execution
     run_file = ""
     if executable.startswith("./"):

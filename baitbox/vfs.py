@@ -108,6 +108,18 @@ class VirtualFilesystem:
                 b"*/5 *   * * *   root    /root/scripts/health_check.sh >> /var/log/health.log 2>&1\n"
                 b"0 2     * * *   root    mysqldump -u root -pPROD_DB_PASS_FAKE wordpress > /root/db_backup.sql\n"
             ),
+            "/etc/group": (
+                b"root:x:0:\n"
+                b"daemon:x:1:\n"
+                b"bin:x:2:\n"
+                b"sys:x:3:\n"
+                b"adm:x:4:ubuntu\n"
+                b"sudo:x:27:ubuntu,deploy\n"
+                b"www-data:x:33:\n"
+                b"docker:x:999:ubuntu\n"
+                b"ubuntu:x:1000:\n"
+                b"deploy:x:1001:\n"
+            ),
             "/etc/hostname": b"web-prod-01\n",
             "/etc/hosts": (
                 b"127.0.0.1\tlocalhost\n"
@@ -120,6 +132,27 @@ class VirtualFilesystem:
                 b"# The following lines are desirable for IPv6 capable hosts\n"
                 b"::1\tip6-localhost ip6-loopback\n"
             ),
+            "/etc/issue": b"Ubuntu 22.04.4 LTS \\n \\l\n\n",
+            "/etc/os-release": (
+                b'PRETTY_NAME="Ubuntu 22.04.4 LTS"\n'
+                b'NAME="Ubuntu"\n'
+                b'VERSION_ID="22.04"\n'
+                b'VERSION="22.04.4 LTS (Jammy Jellyfish)"\n'
+                b'VERSION_CODENAME=jammy\n'
+                b'ID=ubuntu\n'
+                b'ID_LIKE=debian\n'
+                b'HOME_URL="https://www.ubuntu.com/"\n'
+                b'SUPPORT_URL="https://help.ubuntu.com/"\n'
+                b'BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\n'
+                b'PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\n'
+                b'UBUNTU_CODENAME=jammy\n'
+            ),
+            "/etc/lsb-release": (
+                b"DISTRIB_ID=Ubuntu\n"
+                b"DISTRIB_RELEASE=22.04\n"
+                b"DISTRIB_CODENAME=jammy\n"
+                b"DISTRIB_DESCRIPTION=\"Ubuntu 22.04.4 LTS\"\n"
+            ),
             "/etc/passwd": (
                 b"root:x:0:0:root:/root:/bin/bash\n"
                 b"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
@@ -129,6 +162,21 @@ class VirtualFilesystem:
                 b"ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
                 b"deploy:x:1001:1001:Deploy User:/home/ubuntu:/bin/bash\n"
                 b"nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+            ),
+            "/etc/sudoers": (
+                b"# /etc/sudoers\n"
+                b"Defaults\tenv_reset\n"
+                b"Defaults\tmail_badpass\n"
+                b"Defaults\tsecure_path=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n"
+                b"root\tALL=(ALL:ALL) ALL\n"
+                b"%admin ALL=(ALL) ALL\n"
+                b"%sudo\tALL=(ALL:ALL) ALL\n"
+                b"www-data ALL=(ALL) NOPASSWD: /usr/sbin/service nginx restart\n"
+            ),
+            "/etc/fstab": (
+                b"# /etc/fstab: static file system information.\n"
+                b"UUID=a1b2c3d4-e5f6-7890-abcd-ef1234567890 /               ext4    errors=remount-ro 0       1\n"
+                b"UUID=f9e8d7c6-b5a4-3210-9876-543210fedcba /data           ext4    defaults        0       2\n"
             ),
             "/etc/resolv.conf": b"nameserver 8.8.8.8\nnameserver 1.1.1.1\nsearch internal\n",
             "/etc/shadow": (
