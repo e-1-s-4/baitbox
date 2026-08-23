@@ -20,6 +20,11 @@ async def init_db() -> None:
     await db_instance.init_db()
 
 
+async def prune_events(retention_hours: int) -> int:
+    """Delete events older than the retention window. Returns rows removed."""
+    return await db_instance.prune_events(retention_hours)
+
+
 async def get_geoip_cache(ip: str) -> Optional[Dict[str, Any]]:
     """Retrieve GeoIP cache entry from the database."""
     return await db_instance.get_geoip_cache(ip)
@@ -35,14 +40,37 @@ async def log_event(src_ip: str, protocol: str, event_type: str, payload: Dict[s
     return await db_instance.log_event(src_ip, protocol, event_type, payload)
 
 
-async def get_recent_events(limit: int = 50) -> List[Dict[str, Any]]:
-    """Retrieve the most recent logged events."""
-    return await db_instance.get_recent_events(limit)
+async def get_recent_events(
+    limit: int = 50,
+    protocol: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    event_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Retrieve the most recent logged events, optionally filtered."""
+    return await db_instance.get_recent_events(limit, protocol=protocol, src_ip=src_ip, event_type=event_type)
 
 
 async def get_stats() -> Dict[str, Any]:
     """Retrieve telemetry metrics for the dashboards."""
     return await db_instance.get_stats()
+
+
+async def persist_blocked_ip(ip: str) -> None:
+    """Store a blocked IP so it survives restarts."""
+    await db_instance.block_ip(ip)
+
+
+async def persist_unblocked_ip(ip: str) -> None:
+    """Remove a blocked IP from persistent storage."""
+    await db_instance.unblock_ip(ip)
+
+
+async def load_blocked_ips() -> List[str]:
+    """Return all persisted blocked IPs (used at startup)."""
+    try:
+        return await db_instance.get_blocked_ips()
+    except Exception:
+        return []
 
 
 async def get_user_password_hash(username: str) -> Optional[str]:

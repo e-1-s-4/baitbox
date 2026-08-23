@@ -1,35 +1,42 @@
-"""State management for active SSH sessions in BaitBox."""
+"""State management for active SSH/Telnet sessions in BaitBox."""
 
 from __future__ import annotations
 import threading
 import time
 import logging
 from typing import Any, Dict, List
-import paramiko
 
 logger = logging.getLogger("baitbox.sessions")
 
 class SSHSession:
+    """An interactive honeypot session (SSH or Telnet).
+
+    ``channel``/``transport`` are paramiko objects for SSH sessions; for
+    Telnet sessions they are lightweight stubs exposing ``close()``.
+    """
+
     def __init__(
         self,
         session_id: str,
         src_ip: str,
         src_port: int,
         username: str,
-        channel: paramiko.Channel,
-        transport: paramiko.Transport,
+        channel: Any = None,
+        transport: Any = None,
+        protocol: str = "SSH",
     ) -> None:
         self.session_id = session_id
         self.src_ip = src_ip
         self.src_port = src_port
         self.username = username
+        self.protocol = protocol
         self.login_time = time.time()
         self.last_seen = time.time()
         self.channel = channel
         self.transport = transport
         self.cwd = "/root"
         self.commands: List[Dict[str, Any]] = []
-        
+
         # Initialize a custom virtual filesystem for this session
         from .vfs import VirtualFilesystem
         self.vfs = VirtualFilesystem()
@@ -42,14 +49,13 @@ class SSHSession:
         })
 
     def close(self) -> None:
-        try:
-            self.channel.close()
-        except Exception:
-            pass
-        try:
-            self.transport.close()
-        except Exception:
-            pass
+        for obj in (self.channel, self.transport):
+            if obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:
+                pass
 
     def is_stale(self, timeout_seconds: int = 3600) -> bool:
         """Check if session is stale (no activity for timeout_seconds)."""
@@ -87,6 +93,7 @@ class SessionManager:
                 "src_ip": s.src_ip,
                 "src_port": s.src_port,
                 "username": s.username,
+                "protocol": s.protocol,
                 "login_time": s.login_time,
                 "last_seen": s.last_seen,
                 "duration_seconds": round(time.time() - s.login_time, 2),

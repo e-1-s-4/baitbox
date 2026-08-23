@@ -11,7 +11,7 @@ from .config import settings
 _LOCK = threading.RLock()
 # ip -> list of timestamps of recent connections
 _CONN_LOG: dict[str, list[float]] = {}
-# Manually blocked IPs (from dashboard action)
+# Manually blocked IPs (from dashboard action; optionally persisted to the DB)
 _BLOCKED: set[str] = set()
 
 # Thresholds (overridable via environment variables)
@@ -19,6 +19,8 @@ RATE_WINDOW_SECS = 60
 RATE_LIMIT_SSH = settings.rate_limit_ssh
 RATE_LIMIT_HTTP = settings.rate_limit_http
 RATE_LIMIT_TELNET = settings.rate_limit_telnet
+
+_records_since_prune = 0
 
 
 def _limit_for(protocol: str) -> int:
@@ -32,6 +34,7 @@ def _limit_for(protocol: str) -> int:
 
 def record_connection(ip: str, protocol: str = "SSH") -> None:
     """Record a connection from an IP for rate-limit tracking."""
+    global _records_since_prune
     with _LOCK:
         now = time.time()
         log = _CONN_LOG.setdefault(ip, [])
@@ -39,11 +42,29 @@ def record_connection(ip: str, protocol: str = "SSH") -> None:
         # Trim old entries
         cutoff = now - RATE_WINDOW_SECS
         _CONN_LOG[ip] = [t for t in log if t >= cutoff]
+        _records_since_prune += 1
+        if _records_since_prune >= 1000:
+            _records_since_prune = 0
+            prune_connection_log()
+
+
+def prune_connection_log(max_ips: int = 5000, idle_secs: float = 600.0) -> int:
+    """Remove tracking entries for IPs that stopped connecting recently."""
+    now = time.time()
+    with _LOCK:
+        stale = [
+            ip for ip, timestamps in _CONN_LOG.items()
+            if not timestamps or (now - timestamps[-1]) > idle_secs
+        ]
+        for ip in stale:
+            del _CONN_LOG[ip]
+        return len(stale)
 
 
 def is_blocked(ip: str) -> bool:
     """Return True if the IP is manually blocked."""
-    return ip in _BLOCKED
+    with _LOCK:
+        return ip in _BLOCKED
 
 
 def is_rate_limited(ip: str, protocol: str = "SSH") -> bool:
@@ -53,6 +74,12 @@ def is_rate_limited(ip: str, protocol: str = "SSH") -> bool:
         cutoff = now - RATE_WINDOW_SECS
         log = [t for t in _CONN_LOG.get(ip, []) if t >= cutoff]
         return len(log) > _limit_for(protocol)
+
+
+def load_blocked_ips(ips: list[str]) -> None:
+    """Seed the in-memory block list (e.g. from persistent storage)."""
+    with _LOCK:
+        _BLOCKED.update(ips)
 
 
 def block_ip(ip: str) -> None:

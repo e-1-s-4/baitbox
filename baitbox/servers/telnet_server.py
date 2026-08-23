@@ -1,54 +1,129 @@
-"""Simple Telnet honeypot that captures credential and command data."""
+"""Telnet honeypot with a stateful fake shell.
+
+Attackers that connect are greeted by a login prompt, their credentials
+are captured, and they are dropped into the same virtual filesystem shell
+used by the SSH honeypot.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from ..config import settings
 from ..db import log_event
 from ..pubsub import pubsub
 from ..ratelimit import is_blocked, is_rate_limited, record_connection
+from ..sessions import SSHSession, session_manager
 
 logger = logging.getLogger("baitbox.telnet")
 
 HOSTNAME = settings.ssh_banner_hostname
 
-# Minimal Telnet negotiation bytes — we strip them from received data
-_TELNET_IAC = b"\xff"
+# Telnet protocol constants (RFC 854)
+_IAC = 0xFF
+_DONT = 0xFE
+_DO = 0xFD
+_WONT = 0xFC
+_WILL = 0xFB
+_SB = 0xFA
+_SE = 0xF0
 
 _BANNER = (
     f"\r\n"
     f"{HOSTNAME} login: "
 ).encode()
 
-_MOTD = (
-    f"\r\nWelcome to Ubuntu 22.04.4 LTS ({HOSTNAME})\r\n"
-    f"Last login: Mon Jun 23 07:12:01 2026 from 10.0.0.1\r\n"
-    f"\r\n$ "
-).encode()
+_MOTD_TEMPLATE = (
+    "\r\nWelcome to Ubuntu 22.04.4 LTS ({hostname})\r\n"
+    "\r\n * Documentation:  https://help.ubuntu.com\r\n"
+    " * Management:     https://landscape.canonical.com\r\n"
+    "\r\nLast login: Mon Jun 23 07:12:01 2026 from 10.0.0.1\r\n"
+)
+
+
+def _split_telnet_stream(data: bytes) -> tuple[bytes, bytes]:
+    """Strip complete Telnet IAC sequences, returning ``(clean, pending_tail)``.
+
+    ``pending_tail`` holds an incomplete trailing sequence so it can be
+    prepended to the next received chunk.
+    """
+    out = bytearray()
+    i = 0
+    n = len(data)
+    while i < n:
+        byte = data[i]
+        if byte != _IAC:
+            out.append(byte)
+            i += 1
+            continue
+        # IAC at end of chunk — wait for the rest of the sequence
+        if i + 1 >= n:
+            return bytes(out), data[i:]
+        cmd = data[i + 1]
+        if cmd == _IAC:  # escaped literal 0xFF
+            out.append(_IAC)
+            i += 2
+            continue
+        if cmd in (_WILL, _WONT, _DO, _DONT):
+            if i + 2 >= n:
+                return bytes(out), data[i:]  # option byte arrives later
+            i += 3
+            continue
+        if cmd == _SB:
+            # Skip until IAC SE (or end of chunk)
+            j = i + 2
+            while j < n:
+                if data[j] == _IAC and j + 1 < n and data[j + 1] == _SE:
+                    j += 2
+                    break
+                if data[j] == _IAC and j + 1 >= n:
+                    return bytes(out), data[i:]
+                j += 1
+            else:
+                return bytes(out), data[i:]
+            i = j
+            continue
+        # All remaining commands are two bytes
+        if i + 2 > n:
+            return bytes(out), data[i:]
+        i += 2
+    return bytes(out), b""
 
 
 def _strip_telnet_options(data: bytes) -> bytes:
-    """Strip Telnet IAC command sequences from received data."""
-    result = bytearray()
-    i = 0
-    while i < len(data):
-        if data[i:i+1] == _TELNET_IAC and i + 2 < len(data):
-            i += 3  # Skip IAC CMD OPT
-        else:
-            result.append(data[i])
-            i += 1
-    return bytes(result)
+    """Strip Telnet IAC command sequences from received data.
+
+    Handles two-byte commands, WILL/WONT/DO/DONT option negotiation,
+    ``IAC IAC`` escapes, and ``SB ... SE`` subnegotiations. Incomplete
+    trailing sequences are preserved for the next chunk.
+    """
+    clean, _tail = _split_telnet_stream(data)
+    return clean
 
 
 async def _publish(event: dict[str, Any]) -> None:
     await pubsub.publish(event)
 
 
+class _TransportStub:
+    """Lightweight close() target so telnet sessions fit SessionManager."""
+
+    def __init__(self, protocol: "TelnetHoneypot") -> None:
+        self._protocol = protocol
+
+    def close(self) -> None:
+        try:
+            if self._protocol.transport is not None:
+                self._protocol.transport.close()
+        except Exception:
+            pass
+
+
 class TelnetHoneypot(asyncio.Protocol):
-    """Asyncio protocol implementing a fake Telnet server."""
+    """Asyncio protocol implementing a fake Telnet server with a VFS shell."""
 
     def __init__(self) -> None:
         self.transport: asyncio.Transport | None = None
@@ -56,7 +131,12 @@ class TelnetHoneypot(asyncio.Protocol):
         self.peer_port = 0
         self.state = "login"  # login | password | shell
         self.username = ""
+        self.session_id = ""
         self._buf = b""
+        self._pending_iac = b""
+        self.session: SSHSession | None = None
+
+    # ── asyncio.Protocol lifecycle ──────────────────────────────────────────
 
     def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
         self.transport = transport
@@ -70,20 +150,30 @@ class TelnetHoneypot(asyncio.Protocol):
         transport.write(_BANNER)
 
     def data_received(self, data: bytes) -> None:
-        data = _strip_telnet_options(data)
-        self._buf += data
-        while b"\r\n" in self._buf or b"\n" in self._buf or b"\r" in self._buf:
+        stream = self._pending_iac + data
+        clean, self._pending_iac = _split_telnet_stream(stream)
+        self._buf += clean
+        while True:
             for sep in (b"\r\n", b"\n", b"\r"):
                 if sep in self._buf:
                     line, self._buf = self._buf.split(sep, 1)
-                    asyncio.create_task(self._handle_line(line.decode("utf-8", errors="replace").strip()))
+                    asyncio.get_running_loop().create_task(
+                        self._handle_line(line.decode("utf-8", errors="replace").strip())
+                    )
                     break
+            else:
+                break
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._teardown_session()
+
+    # ── State machine ───────────────────────────────────────────────────────
 
     async def _handle_line(self, line: str) -> None:
         assert self.transport is not None
 
         if self.state == "login":
-            self.username = line
+            self.username = line[:64] or "root"
             self.transport.write(b"Password: ")
             self.state = "password"
 
@@ -96,36 +186,84 @@ class TelnetHoneypot(asyncio.Protocol):
                 {"username": self.username, "password": password, "method": "telnet"},
             )
             await _publish(event)
-            self.transport.write(_MOTD)
+            self._enter_shell()
+            self.transport.write(_MOTD_TEMPLATE.format(hostname=HOSTNAME).encode())
+            self.transport.write(self.prompt())
             self.state = "shell"
 
         elif self.state == "shell":
             command = line.strip()
-            
-            # Validate command length
+
             if len(command) > settings.max_command_length:
-                self.transport.write(b"sh: command line too long\r\n$ ")
+                self.transport.write(b"bash: command line too long\r\n" + self.prompt())
                 return
-            
-            if command:
-                event = await log_event(
-                    self.peer_ip,
-                    "Telnet",
-                    "command",
-                    {"command": command, "username": self.username},
-                )
-                await _publish(event)
 
-                if command in {"exit", "logout", "quit"}:
-                    self.transport.write(b"\r\nlogout\r\n")
-                    self.transport.close()
-                    return
+            if not command:
+                self.transport.write(self.prompt())
+                return
 
-                # Simple static responses for common commands
-                response = self._fake_response(command)
-                self.transport.write(response + b"\r\n$ ")
+            event = await log_event(
+                self.peer_ip,
+                "Telnet",
+                "command",
+                {"command": command, "username": self.username},
+            )
+            await _publish(event)
+
+            response, should_close = self.run_command(command)
+            self.transport.write(response)
+            if should_close or command in {"exit", "logout", "quit"}:
+                self.transport.write(b"\r\nlogout\r\n")
+                self._teardown_session()
+                self.transport.close()
+                return
+            self.transport.write(self.prompt())
+
+    def _teardown_session(self) -> None:
+        """Unregister the tracked session (idempotent)."""
+        if self.session_id:
+            session_manager.unregister(self.session_id)
+            self.session_id = ""
+
+    def _enter_shell(self) -> None:
+        """Register this connection as a trackable honeypot session."""
+        stub = _TransportStub(self)
+        self.session_id = uuid.uuid4().hex
+        self.session = SSHSession(
+            session_id=self.session_id,
+            src_ip=self.peer_ip,
+            src_port=self.peer_port,
+            username=self.username,
+            channel=None,
+            transport=stub,
+            protocol="Telnet",
+        )
+        session_manager.register(self.session)
+
+    def run_command(self, command: str) -> tuple[bytes, bool]:
+        """Execute a command through the shared fake-shell engine."""
+        if self.session is None:
+            self._enter_shell()
+        assert self.session is not None
+        try:
+            from .ssh_server import execute_session_command
+            return execute_session_command(self.session, command)
+        except Exception:
+            logger.exception("telnet shell error")
+            return b"bash: internal error\r\n", False
+
+    def prompt(self) -> bytes:
+        if self.session is None:
+            return b"$ "
+        cwd = self.session.cwd
+        home = "/root" if self.session.username == "root" else f"/home/{self.session.username}"
+        if cwd == home:
+            cwd = "~"
+        char = "#" if self.session.username == "root" else "$"
+        return f"{self.session.username}@{HOSTNAME}:{cwd}{char} ".encode()
 
     def _fake_response(self, command: str) -> bytes:
+        """Legacy static responses — kept for compatibility/testing."""
         cmd = command.split()[0] if command.split() else ""
         responses: dict[str, bytes] = {
             "whoami": b"root",
@@ -141,13 +279,11 @@ class TelnetHoneypot(asyncio.Protocol):
         }
         return responses.get(cmd, f"sh: {cmd}: command not found".encode())
 
-    def connection_lost(self, exc: Exception | None) -> None:
-        pass
-
 
 async def start_telnet_server(host: str = "0.0.0.0", port: int = 2323) -> None:
     loop = asyncio.get_running_loop()
     server = await loop.create_server(TelnetHoneypot, host, port)
+    logger.info("Telnet honeypot listening on %s:%s", host, port)
     print(f"[Telnet Honeypot] Listening on {host}:{port}")
     async with server:
         await server.serve_forever()

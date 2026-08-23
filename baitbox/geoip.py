@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import time
@@ -87,22 +88,7 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
     data: dict[str, Any] = _unknown_geoip(ip)
 
     try:
-        # ip-api.com free tier: 45 req/min, no API key needed
-        url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp,org,proxy,hosting"
-        req = urllib.request.Request(url, headers={"User-Agent": "BaitBox/2.0"})
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            raw = json.loads(resp.read().decode())
-        if raw.get("status") == "success":
-            data.update({
-                "city": raw.get("city", "Unknown"),
-                "country": raw.get("country", "Unknown"),
-                "countryCode": raw.get("countryCode", "XX"),
-                "lat": raw.get("lat", 0.0),
-                "lon": raw.get("lon", 0.0),
-                "isp": raw.get("isp", "Unknown"),
-                "org": raw.get("org", "Unknown"),
-                "threat_score": _threat_score(raw),
-            })
+        data = await _lookup_remote(ip, data)
     except Exception as exc:
         logger.debug("GeoIP lookup failed for %s: %s", ip, exc)
 
@@ -112,6 +98,38 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
         await set_geoip_cache(ip, data, ttl=_TTL)
     except Exception as exc:
         logger.debug("GeoIP SQLite cache write failed for %s: %s", ip, exc)
+    return data
+
+
+async def _lookup_remote(ip: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Query ip-api.com without blocking the event loop (runs in a thread)."""
+    # ip-api.com free tier: 45 req/min, no API key needed
+    url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp,org,proxy,hosting"
+
+    def _fetch() -> dict[str, Any] | None:
+        req = urllib.request.Request(url, headers={"User-Agent": "BaitBox/2.2"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            return json.loads(resp.read().decode())
+
+    try:
+        raw = await asyncio.to_thread(_fetch)
+    except Exception:
+        return fallback
+
+    if not raw or raw.get("status") != "success":
+        return fallback
+
+    data = dict(fallback)
+    data.update({
+        "city": raw.get("city", "Unknown"),
+        "country": raw.get("country", "Unknown"),
+        "countryCode": raw.get("countryCode", "XX"),
+        "lat": raw.get("lat", 0.0),
+        "lon": raw.get("lon", 0.0),
+        "isp": raw.get("isp", "Unknown"),
+        "org": raw.get("org", "Unknown"),
+        "threat_score": _threat_score(raw),
+    })
     return data
 
 

@@ -5,17 +5,20 @@ from __future__ import annotations
 import csv
 import io
 import json
+import secrets
+import threading
+import time
 from http.cookies import SimpleCookie
 from ipaddress import ip_address
 from urllib.parse import parse_qs
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..db import get_recent_events, get_stats, log_event
+from ..db import get_recent_events, get_stats, log_event, persist_blocked_ip, persist_unblocked_ip
 from ..pubsub import pubsub
 from ..ratelimit import (
     block_ip,
@@ -39,6 +42,8 @@ STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 LOGIN_HTML = STATIC_DIR / "login.html"
 
+APP_VERSION = "2.2.0"
+
 
 def create_jwt_token(username: str, expires_delta: dt.timedelta | None = None) -> str:
     """Create a signed dashboard session token for a username."""
@@ -60,10 +65,58 @@ def verify_jwt_token(token: str) -> str | None:
         return None
 
 
+# Pre-computed hash of a random secret so unknown usernames cost the same
+# bcrypt work as known ones (mitigates user-enumeration via timing).
+_DUMMY_PASSWORD_HASH: str = bcrypt.hashpw(
+    secrets.token_urlsafe(24).encode("utf-8"), bcrypt.gensalt()
+).decode("utf-8")
+
+# Dashboard login brute-force protection: failed attempts per IP.
+_login_lock = threading.Lock()
+_login_failures: dict[str, list[float]] = {}
+
+
+def _client_key(request_or_ip: Any) -> str:
+    if isinstance(request_or_ip, str):
+        return request_or_ip
+    return _client_ip(request_or_ip)
+
+
+def _record_login_failure(ip: str) -> None:
+    with _login_lock:
+        now = time.time()
+        window_start = now - settings.login_rate_window_secs
+        failures = [t for t in _login_failures.get(ip, []) if t >= window_start]
+        failures.append(now)
+        _login_failures[ip] = failures
+
+
+def _clear_login_failures(ip: str) -> None:
+    with _login_lock:
+        _login_failures.pop(ip, None)
+
+
+def login_is_rate_limited(ip: str) -> bool:
+    """Return True when the IP exceeded failed dashboard-login attempts."""
+    with _login_lock:
+        now = time.time()
+        window_start = now - settings.login_rate_window_secs
+        failures = [t for t in _login_failures.get(ip, []) if t >= window_start]
+        return len(failures) >= settings.login_rate_limit
+
+
 async def verify_user_credentials(username: str, password: str) -> bool:
-    """Validate dashboard credentials against the configured bcrypt hash."""
+    """Validate dashboard credentials against the configured bcrypt hash.
+
+    Falls back to a dummy-hash comparison for unknown users so response
+    timing does not reveal which usernames exist.
+    """
     password_hash = await get_user_password_hash(username)
     if not password_hash:
+        try:
+            bcrypt.checkpw(password.encode("utf-8"), _DUMMY_PASSWORD_HASH.encode("utf-8"))
+        except Exception:
+            pass
         return False
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
@@ -178,16 +231,17 @@ class SecurityHeadersMiddleware:
 app = FastAPI(
     title="BaitBox",
     description="A lightweight honeypot with a real-time dashboard.",
-    version="2.1.0",
+    version=APP_VERSION,
 )
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AuthMiddleware)
-# Note: CORS is permissive for honeypot purposes to capture all traffic
-# In production, consider restricting to specific origins if needed
+# Note: CORS is permissive for honeypot purposes to capture all traffic.
+# Credentials are not allowed cross-origin (invalid per the fetch spec and
+# unnecessary — the dashboard is same-origin).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -504,8 +558,16 @@ async def login_page() -> str:
 
 @app.post("/login")
 @app.post("/api/auth/login")
-async def login(username: str = Form(...), password: str = Form(...)) -> Response:
+async def login(request: Request, username: str = Form(...), password: str = Form(...)) -> Response:
+    src_ip = _client_ip(request)
+    if login_is_rate_limited(src_ip):
+        return JSONResponse(
+            {"detail": "Too many failed login attempts. Try again later."},
+            status_code=429,
+            headers={"Retry-After": str(settings.login_rate_window_secs)},
+        )
     if await verify_user_credentials(username, password):
+        _clear_login_failures(src_ip)
         token = create_jwt_token(username)
         response = JSONResponse({"status": "ok"})
         response.set_cookie(
@@ -513,10 +575,11 @@ async def login(username: str = Form(...), password: str = Form(...)) -> Respons
             value=token,
             httponly=True,
             samesite="lax",
-            max_age=24 * 60 * 60,
+            max_age=settings.jwt_expiry_hours * 60 * 60,
             secure=settings.session_cookie_secure,
         )
         return response
+    _record_login_failure(src_ip)
     return JSONResponse(
         {"detail": "Invalid username or password"},
         status_code=401
@@ -524,6 +587,7 @@ async def login(username: str = Form(...), password: str = Form(...)) -> Respons
 
 
 @app.get("/logout")
+@app.post("/logout")
 async def logout() -> Response:
     response = RedirectResponse(url="/login", status_code=307)
     response.delete_cookie(key="session_token")
@@ -562,8 +626,18 @@ async def readyz() -> Response:
 
 
 @app.get("/api/events")
-async def api_events(limit: int = 100) -> list[dict[str, Any]]:
-    events = await get_recent_events(limit=_limit_value(limit))
+async def api_events(
+    limit: int = 100,
+    protocol: str | None = None,
+    src_ip: str | None = None,
+    event_type: str | None = None,
+) -> list[dict[str, Any]]:
+    events = await get_recent_events(
+        limit=_limit_value(limit),
+        protocol=protocol or None,
+        src_ip=src_ip or None,
+        event_type=event_type or None,
+    )
     return [_enrich_event(ev) for ev in events]
 
 
@@ -575,11 +649,19 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
-            fieldnames=["id", "timestamp", "src_ip", "protocol", "event_type", "payload"],
+            fieldnames=[
+                "id", "timestamp", "src_ip", "protocol", "event_type",
+                "threat_score", "threat_level", "payload",
+            ],
         )
         writer.writeheader()
         for event in events:
-            writer.writerow({**event, "payload": json.dumps(event.get("payload", {}), sort_keys=True)})
+            writer.writerow({
+                **event,
+                "threat_score": event.get("threat_score", ""),
+                "threat_level": event.get("threat_level", ""),
+                "payload": json.dumps(event.get("payload", {}), sort_keys=True, default=str),
+            })
         return Response(
             output.getvalue(),
             media_type="text/csv",
@@ -624,7 +706,11 @@ async def api_block_ip(ip: str) -> dict[str, Any]:
     except ValueError as exc:
         return {"status": "error", "message": str(exc)}
     block_ip(ip)
-    # Also terminate any active SSH sessions from this IP
+    try:
+        await persist_blocked_ip(ip)
+    except Exception:
+        pass  # in-memory block still applies if persistence fails
+    # Also terminate any active SSH/Telnet sessions from this IP
     from ..sessions import session_manager
     sessions = session_manager.list_sessions()
     killed = 0
@@ -645,6 +731,10 @@ async def api_unblock_ip(ip: str) -> dict[str, Any]:
     except ValueError as exc:
         return {"status": "error", "message": str(exc)}
     unblock_ip(ip)
+    try:
+        await persist_unblocked_ip(ip)
+    except Exception:
+        pass
     return {"status": "ok", "message": f"IP {ip} unblocked."}
 
 

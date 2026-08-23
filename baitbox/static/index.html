@@ -698,7 +698,7 @@
       <span class="logo-icon">🪤</span>
       <div class="logo-text">
         <h1>BAITBOX</h1>
-        <p>CYBER COMMAND DECOY SYSTEM v2.1</p>
+        <p>CYBER COMMAND DECOY SYSTEM v2.2</p>
       </div>
     </div>
 
@@ -873,7 +873,7 @@
     </div><!-- /main-grid -->
   </main>
 
-  <footer>BaitBox Honeypot System v2.0 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/qylen/baitbox" style="color:var(--green);text-decoration:none">GitHub</a></footer>
+  <footer>BaitBox Honeypot System v2.2 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/qylen/baitbox" style="color:var(--green);text-decoration:none">GitHub</a></footer>
 
 </div><!-- /layout -->
 
@@ -908,6 +908,7 @@ let mapMarkers = {};   // key -> L.circleMarker
 let timelineChart = null;
 let protoChart = null;
 let geoCache = {};     // ip -> {lat,lon,city,country,countryCode,threat_score}
+let serverTotalEvents = null;  // authoritative total from /api/stats
 const MAX_EVENTS = 300;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1130,8 +1131,10 @@ async function fetchStats() {
     updateTimeline(stats.hourly_events || []);
     blockedIps = new Set(stats.blocked_ips || []);
     document.getElementById('stat-blocked').textContent = blockedIps.size;
-    if (stats.total_events !== undefined)
+    if (stats.total_events !== undefined) {
+      serverTotalEvents = stats.total_events;
       document.getElementById('stat-total').textContent = stats.total_events;
+    }
     // Check if telnet data exists
     const hasTelnet = (stats.by_protocol || []).some(p => p.protocol === 'Telnet');
     if (hasTelnet) document.getElementById('telnet-badge').style.display = '';
@@ -1139,7 +1142,10 @@ async function fetchStats() {
 }
 
 function updateStatCards() {
-  document.getElementById('stat-total').textContent = events.length;
+  if (serverTotalEvents !== null)
+    document.getElementById('stat-total').textContent = serverTotalEvents;
+  else
+    document.getElementById('stat-total').textContent = events.length;
   document.getElementById('stat-auth').textContent = events.filter(e => e.event_type === 'auth_attempt').length;
   document.getElementById('stat-cmds').textContent = events.filter(e => e.event_type === 'command').length;
   document.getElementById('stat-http').textContent = events.filter(e => e.protocol === 'HTTP').length;
@@ -1166,6 +1172,7 @@ function connectWS() {
 
     events.push(ev);
     if (events.length > MAX_EVENTS) events.shift();
+    if (serverTotalEvents !== null) serverTotalEvents += 1;
 
     if (!paused) appendEventRow(ev);
 
@@ -1213,7 +1220,7 @@ function buildEventRow(ev) {
   div.className = 'event-row';
 
   const geo = geoCache[ev.src_ip];
-  const country = geo ? `${geo.city ? geo.city + ', ' : ''}${geo.countryCode || ''}` : '';
+  const country = geo ? `${geo.city ? escHtml(geo.city) + ', ' : ''}${escHtml(geo.countryCode || '')}` : '';
 
   let threat = 0;
   let threatLabel = '🟢 LOW';
@@ -1312,13 +1319,13 @@ function renderSessions() {
             <span>${s.src_ip}${country}</span>
             ${threatBadge}
           </div>
-          <div class="session-meta">user: ${s.username} · port: ${s.src_port}</div>
+          <div class="session-meta">${escHtml(s.protocol || 'SSH')} · user: ${escHtml(s.username)} · port: ${s.src_port}</div>
         </div>
       </div>
       <div class="session-stats">
         <div class="session-stat">Duration: <span>${fmtDuration(s.duration_seconds)}</span></div>
         <div class="session-stat">Idle: <span>${fmtDuration(s.idle_seconds)}</span></div>
-        <div class="session-stat">CWD: <span style="color:var(--green)">${s.cwd}</span></div>
+        <div class="session-stat">CWD: <span style="color:var(--green)">${escHtml(s.cwd)}</span></div>
         <div class="session-stat">Cmds: <span>${s.commands.length}</span></div>
       </div>
       ${s.commands.length ? `<div class="session-cmds">${s.commands.slice(-4).map(c => `<div>${escHtml(c.command)}</div>`).join('')}</div>` : ''}

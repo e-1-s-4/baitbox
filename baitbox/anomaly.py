@@ -16,18 +16,48 @@ _ip_metrics: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
     "file_access_detected": False,
 })
 
+# Pruning controls: cap memory usage for scans from many unique IPs.
+_MAX_TRACKED_IPS = 5000
+_IDLE_SECONDS = 3600.0
+_last_activity: Dict[str, float] = {}
+_events_since_prune = 0
+
 
 def _clean_old_timestamps(lst: List[float], now: float, window: float = 60.0) -> List[float]:
     """Remove timestamps older than the specified window."""
     return [t for t in lst if now - t <= window]
 
 
+def prune_metrics(max_ips: int = _MAX_TRACKED_IPS, idle_seconds: float = _IDLE_SECONDS) -> int:
+    """Drop idle IP entries when the tracking table grows too large."""
+    now = time.time()
+    if len(_ip_metrics) <= max_ips:
+        return 0
+    stale = [
+        ip for ip, last in _last_activity.items()
+        if now - last > idle_seconds
+    ]
+    for ip in stale:
+        _ip_metrics.pop(ip, None)
+        _last_activity.pop(ip, None)
+
+    # Still too large? Evict the least recently active half.
+    if len(_ip_metrics) > max_ips:
+        ordered = sorted(_last_activity.items(), key=lambda kv: kv[1])
+        for ip, _ in ordered[: len(ordered) // 2]:
+            _ip_metrics.pop(ip, None)
+            _last_activity.pop(ip, None)
+    return len(stale)
+
+
 def reset_metrics(ip: str | None = None) -> None:
     """Clear in-memory anomaly metrics (used by tests)."""
     if ip is None:
         _ip_metrics.clear()
+        _last_activity.clear()
     else:
         _ip_metrics.pop(ip, None)
+        _last_activity.pop(ip, None)
 
 
 def get_threat_score(ip: str) -> Dict[str, Any]:
@@ -98,6 +128,7 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
     Analyze a new honeypot event, update IP metrics, and return threat information.
     Modifies in-memory metrics for the event's source IP.
     """
+    global _events_since_prune
     src_ip = event.get("src_ip", "unknown")
     event_type = event.get("event_type", "")
     payload = event.get("payload", {})
@@ -105,6 +136,11 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
     now = time.time()
     metrics = _ip_metrics[src_ip]
+    _last_activity[src_ip] = now
+    _events_since_prune += 1
+    if _events_since_prune >= 500:
+        _events_since_prune = 0
+        prune_metrics()
 
     # Update in-memory state
     if event_type == "auth_attempt":

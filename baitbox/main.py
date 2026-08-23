@@ -14,8 +14,9 @@ from rich.table import Table
 
 from .async_bridge import set_main_loop
 from .config import settings
-from .db import init_db
-from .servers.http_server import app
+from .db import init_db, load_blocked_ips, prune_events
+from .ratelimit import load_blocked_ips as apply_blocked_ips
+from .servers.http_server import APP_VERSION, app
 from .servers.ssh_server import start_ssh_server
 from .sessions import session_manager
 
@@ -33,10 +34,27 @@ console = Console()
 _SHUTDOWN = asyncio.Event()
 
 
+async def retention_loop() -> None:
+    """Periodically prune old events according to the configured retention."""
+    hours = settings.event_retention_hours
+    if hours <= 0:
+        return
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            removed = await prune_events(hours)
+            if removed:
+                logger.info("Event retention: pruned %s events older than %sh", removed, hours)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Event retention error: %s", exc)
+
+
 async def main() -> None:
     """Main entry point that initializes and starts all honeypot servers."""
     logger.info("Starting BaitBox honeypot...")
-    
+
     # Initialize Database
     try:
         await init_db()
@@ -48,9 +66,21 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     set_main_loop(loop)
 
+    # Restore persisted IP block list
+    try:
+        blocked = await load_blocked_ips()
+        if blocked:
+            apply_blocked_ips(blocked)
+            logger.info("Restored %s persisted IP block(s)", len(blocked))
+    except Exception as exc:
+        logger.warning("Could not restore blocked IPs: %s", exc)
+
     # Start session cleanup task if enabled
     if settings.enable_session_cleanup:
         session_manager.start_cleanup_task(interval_seconds=settings.session_cleanup_interval)
+
+    # Start event-retention pruning loop (no-op when retention is disabled)
+    retention_task = asyncio.create_task(retention_loop())
 
     if settings.dashboard_password == "admin" or settings.jwt_secret == "baitbox-super-secret-key-change-me":
         console.print(
@@ -76,7 +106,7 @@ async def main() -> None:
 
     console.print(Panel(
         table,
-        title="[bold green]🪤  BaitBox Honeypot v2.1[/bold green]",
+        title=f"[bold green]🪤  BaitBox Honeypot v{APP_VERSION}[/bold green]",
         subtitle="[dim]Trap attackers. Capture intel. Stay safe.[/dim]",
         border_style="green",
         expand=False,
@@ -130,7 +160,13 @@ async def main() -> None:
             await telnet_task
         except asyncio.CancelledError:
             pass
-    
+
+    retention_task.cancel()
+    try:
+        await retention_task
+    except asyncio.CancelledError:
+        pass
+
     logger.info("BaitBox shutdown complete")
 
 

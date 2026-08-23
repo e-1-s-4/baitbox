@@ -57,5 +57,15 @@ class Settings:
     enable_session_cleanup: bool = os.getenv("BAITBOX_ENABLE_SESSION_CLEANUP", "1") not in ("0", "false", "no")
     session_cleanup_interval: int = _safe_int("BAITBOX_SESSION_CLEANUP_INTERVAL", 300)  # 5 minutes
 
+    # Dashboard login brute-force protection (failed attempts per window per IP)
+    login_rate_limit: int = _safe_int("BAITBOX_LOGIN_RATE_LIMIT", 10)
+    login_rate_window_secs: int = _safe_int("BAITBOX_LOGIN_RATE_WINDOW_SECS", 300)
+
+    # Event retention: prune events older than N hours (0 disables pruning)
+    event_retention_hours: int = _safe_int("BAITBOX_EVENT_RETENTION_HOURS", 720)
+
+    # Webhook filtering: only notify for events at/above this threat level
+    webhook_min_threat_level: str = os.getenv("BAITBOX_WEBHOOK_MIN_THREAT_LEVEL", "LOW").upper()
+
 
 settings = Settings()

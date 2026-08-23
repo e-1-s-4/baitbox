@@ -68,6 +68,16 @@ class PostgresDB:
                 """
             )
 
+            # Persisted IP block list (survives restarts)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blocked_ips (
+                    ip TEXT PRIMARY KEY,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
             # Ensure the configured user exists and is up to date
             import bcrypt
             hashed = bcrypt.hashpw(settings.dashboard_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -166,12 +176,31 @@ class PostgresDB:
                 event["payload"] = {"raw": payload}
         return event
 
-    async def get_recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_recent_events(
+        self,
+        limit: int = 50,
+        protocol: Optional[str] = None,
+        src_ip: Optional[str] = None,
+        event_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if protocol:
+            params.append(protocol)
+            clauses.append(f"protocol = ${len(params)}")
+        if src_ip:
+            params.append(src_ip)
+            clauses.append(f"src_ip = ${len(params)}")
+        if event_type:
+            params.append(event_type)
+            clauses.append(f"event_type = ${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM events ORDER BY id DESC LIMIT $1",
-                limit,
+                f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ${len(params)}",
+                *params,
             )
             return [self._decode_row(row) for row in reversed(rows)]
 
@@ -199,7 +228,7 @@ class PostgresDB:
                 """
                 SELECT timestamp, src_ip, payload->>'command' AS command
                 FROM events
-                WHERE protocol = 'SSH' AND event_type = 'command'
+                WHERE protocol IN ('SSH', 'Telnet') AND event_type = 'command'
                 ORDER BY id DESC
                 LIMIT 20
                 """
@@ -273,6 +302,49 @@ class PostgresDB:
             "hourly_events": hourly,
             "top_http_paths": top_paths,
         }
+
+    async def prune_events(self, retention_hours: int) -> int:
+        """Delete events older than the retention window. Returns rows removed."""
+        if retention_hours <= 0:
+            return 0
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            deleted = await conn.fetchval(
+                """
+                WITH removed AS (
+                    DELETE FROM events
+                    WHERE timestamp < NOW() - ($1 || ' hours')::INTERVAL
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM removed
+                """,
+                str(retention_hours),
+            )
+            await conn.execute("DELETE FROM geoip_cache WHERE expires_at <= $1", time.time())
+            return int(deleted or 0)
+
+    async def block_ip(self, ip: str) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO blocked_ips (ip, created_at)
+                VALUES ($1, NOW())
+                ON CONFLICT(ip) DO NOTHING
+                """,
+                ip,
+            )
+
+    async def unblock_ip(self, ip: str) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM blocked_ips WHERE ip = $1", ip)
+
+    async def get_blocked_ips(self) -> List[str]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT ip FROM blocked_ips ORDER BY ip")
+        return [row["ip"] for row in rows]
 
     async def get_user_password_hash(self, username: str) -> Optional[str]:
         pool = await self._get_pool()

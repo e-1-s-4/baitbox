@@ -10,7 +10,7 @@ from baitbox.webhooks import _send_webhook_sync, send_webhook_notification
 
 
 def _webhook_settings(**kwargs):
-    defaults = {"webhook_url": "", "webhook_type": "discord"}
+    defaults = {"webhook_url": "", "webhook_type": "discord", "webhook_min_threat_level": "LOW"}
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
