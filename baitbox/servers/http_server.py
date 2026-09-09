@@ -251,6 +251,7 @@ _DASHBOARD_API_EXACT_PATHS = {
     "/api/events/export",
     "/api/stats",
     "/api/sessions",
+    "/api/attack-summary",
 }
 
 _DASHBOARD_API_PREFIXES = (
@@ -643,9 +644,10 @@ async def api_events(
 
 @app.get("/api/events/export")
 async def api_events_export(limit: int = 500, format: str = "json") -> Response:
-    """Export recent events as JSON or CSV for incident review."""
+    """Export recent events as JSON, CSV, CEF, or ECS for incident review and SIEM ingestion."""
     events = await get_recent_events(limit=_limit_value(limit, maximum=5000))
-    if format.lower() == "csv":
+    fmt = format.lower()
+    if fmt == "csv":
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
@@ -667,8 +669,27 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
             media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=baitbox-events.csv"},
         )
+    elif fmt == "cef":
+        from ..telemetry import export_cef_event
+        cef_lines = [export_cef_event(_enrich_event(dict(ev))) for ev in events]
+        return Response(
+            "\n".join(cef_lines) + ("\n" if cef_lines else ""),
+            media_type="text/plain",
+            headers={"Content-Disposition": "attachment; filename=baitbox-events.cef"},
+        )
+    elif fmt == "ecs":
+        from ..telemetry import export_ecs_event
+        ecs_docs = [export_ecs_event(_enrich_event(dict(ev))) for ev in events]
+        return JSONResponse({"events": ecs_docs, "count": len(ecs_docs)})
 
     return JSONResponse({"events": events, "count": len(events)})
+
+
+@app.get("/api/attack-summary")
+async def api_attack_summary() -> dict[str, Any]:
+    """Return aggregated telemetry across all detected attack vectors and MITRE ATT&CK techniques."""
+    from ..anomaly import get_attack_summary
+    return get_attack_summary()
 
 
 @app.get("/api/stats")
