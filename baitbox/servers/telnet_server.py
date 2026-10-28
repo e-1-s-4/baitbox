@@ -320,9 +320,12 @@ class TelnetHoneypot(asyncio.Protocol):
 
 
 async def start_telnet_server(host: str = "0.0.0.0", port: int = 2323) -> None:
-    loop = asyncio.get_running_loop()
-    server = await loop.create_server(TelnetHoneypot, host, port)
-    logger.info("Telnet honeypot listening on %s:%s", host, port)
-    print(f"[Telnet Honeypot] Listening on {host}:{port}")
-    async with server:
-        await server.serve_forever()
+    try:
+        loop = asyncio.get_running_loop()
+        server = await loop.create_server(TelnetHoneypot, host, port)
+        logger.info("Telnet honeypot listening on %s:%s", host, port)
+        print(f"[Telnet Honeypot] Listening on {host}:{port}")
+        async with server:
+            await server.serve_forever()
+    except Exception as exc:
+        logger.warning(f"Could not bind Telnet honeypot on {host}:{port}: {exc}")

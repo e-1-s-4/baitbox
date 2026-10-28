@@ -46,14 +46,14 @@ WELCOME = (
 def _load_host_key() -> paramiko.PKey:
     """Load a stable host key when configured, otherwise create an ephemeral key."""
     if not settings.ssh_host_key:
-        return paramiko.RSAKey.generate(2048)
+        return paramiko.RSAKey.generate(1024)
 
     key_path = Path(settings.ssh_host_key).expanduser()
     if key_path.exists():
         return paramiko.RSAKey.from_private_key_file(str(key_path))
 
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key = paramiko.RSAKey.generate(2048)
+    key = paramiko.RSAKey.generate(1024)
     key.write_private_key_file(str(key_path))
     return key
 
@@ -2238,16 +2238,25 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
 
 
 def start_ssh_server(host: str = "0.0.0.0", port: int = 2222) -> None:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
-    sock.listen(settings.ssh_backlog)
-    print(f"[SSH Honeypot] Listening on {host}:{port}")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(settings.ssh_backlog)
+        logger.info(f"[SSH Honeypot] Listening on {host}:{port}")
+    except Exception as exc:
+        logger.warning(f"Could not bind SSH honeypot socket on {host}:{port}: {exc}")
+        return
 
     try:
         while True:
             client, addr = sock.accept()
             thread = threading.Thread(target=handle_ssh_client, args=(client, addr), daemon=True)
             thread.start()
+    except Exception as exc:
+        logger.warning(f"SSH listener loop encountered error: {exc}")
     finally:
-        sock.close()
+        try:
+            sock.close()
+        except Exception:
+            pass

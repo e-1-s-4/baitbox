@@ -21,7 +21,7 @@ class Settings:
     ssh_host: str = os.getenv("BAITBOX_SSH_HOST", "0.0.0.0")
     ssh_port: int = _safe_int("BAITBOX_SSH_PORT", 2222)
     dashboard_host: str = os.getenv("BAITBOX_DASHBOARD_HOST", "0.0.0.0")
-    dashboard_port: int = _safe_int("BAITBOX_DASHBOARD_PORT", 8000)
+    dashboard_port: int = _safe_int("BAITBOX_DASHBOARD_PORT", _safe_int("PORT", 3000))
     database_path: str = os.getenv("BAITBOX_DB", "baitbox.db")
     max_events: int = _safe_int("BAITBOX_MAX_EVENTS", 100)
     ssh_host_key: str = os.getenv("BAITBOX_SSH_HOST_KEY", "")

@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>🪤 BaitBox | Cyber Command Center</title>
-  <meta name="description" content="BaitBox honeypot real-time dashboard — monitor SSH and HTTP intrusion attempts live.">
+  <title>BaitBox Honeypot | Cyber Command Center</title>
+  <meta name="description" content="Zero-config multi-protocol honeypot with real-time attack detection and cyber command center dashboard">
+  <meta property="og:title" content="BaitBox Honeypot | Cyber Command Center">
+  <meta property="og:description" content="Zero-config multi-protocol honeypot with real-time attack detection and cyber command center dashboard">
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -909,12 +911,21 @@
 
     <div class="header-right">
       <span class="badge"><span class="dot dot-purple"></span> SSH :2222</span>
-      <span class="badge"><span class="dot dot-cyan"></span> HTTP :8000</span>
+      <span class="badge" id="http-badge"><span class="dot dot-cyan"></span> HTTP :3000</span>
       <span class="badge" id="telnet-badge" style="display:none"><span class="dot dot-amber"></span> Telnet :2323</span>
       <span class="ws-status offline" id="ws-badge">
         <span style="width:8px;height:8px;border-radius:50%;background:currentColor;animation:ping 1s infinite;flex-shrink:0"></span>
         <span id="ws-label">CONNECTING</span>
       </span>
+      <div class="export-wrap">
+        <button class="btn btn-amber" id="sim-btn" onclick="toggleSimMenu(event)" title="Simulate real-time cyber attack">⚡ SIMULATE ATTACK ▾</button>
+        <div class="export-menu" id="sim-menu" style="min-width: 220px;">
+          <button onclick="triggerSim('ssh_bruteforce')">🔐 SSH Brute-Force Wave</button>
+          <button onclick="triggerSim('web_recon')">🌐 Web Vulnerability Probe</button>
+          <button onclick="triggerSim('shell_intrusion')">💻 Interactive Shell Breach</button>
+          <button onclick="triggerSim('critical_exploit')">🔴 High-Threat RCE Exploit</button>
+        </div>
+      </div>
       <a href="/logout" class="btn" style="text-decoration:none;border-color:rgba(255,77,77,0.4);color:var(--red);display:inline-flex;align-items:center;height:28px;">LOGOUT</a>
     </div>
   </header>
@@ -1021,7 +1032,8 @@
                   <button onclick="exportEvents('json')">⬇ JSON</button>
                   <button onclick="exportEvents('cef')">⬇ CEF (ArcSight)</button>
                   <button onclick="exportEvents('ecs')">⬇ ECS (Elastic)</button>
-                  <button onclick="exportEvents('ioc')">⬇ IOC feed</button>
+                  <button onclick="exportEvents('ioc')">⬇ IOC feed (JSON)</button>
+                  <button onclick="exportEvents('stix')">⬇ STIX 2.1 (Intel Bundle)</button>
                 </div>
               </div>
               <button class="btn" id="clear-feed-btn" onclick="clearFeed()" title="Clear feed (C)">CLEAR</button>
@@ -1173,11 +1185,19 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchAttackSummary();
   setInterval(() => fetchSessions(), 4000);
   setInterval(() => fetchStats(), 30000);
-  setInterval(() => fetchAttackSummary(), 10000);
+  const httpBadge = document.getElementById('http-badge');
+  if (httpBadge) {
+    const port = location.port || (location.protocol === 'https:' ? '443' : '80');
+    httpBadge.innerHTML = `<span class="dot dot-cyan"></span> HTTP :${port}`;
+  }
   document.addEventListener('click', (e) => {
     const menu = document.getElementById('export-menu');
     if (menu && menu.classList.contains('open') && !e.target.closest('.export-wrap')) {
       menu.classList.remove('open');
+    }
+    const sim = document.getElementById('sim-menu');
+    if (sim && sim.classList.contains('open') && !e.target.closest('.export-wrap')) {
+      sim.classList.remove('open');
     }
   });
   document.addEventListener('keydown', (e) => {
@@ -1195,9 +1215,9 @@ function initMap() {
     preferCanvas: true,
   }).setView([20, 0], 1.5);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    maxZoom: 19,
-    subdomains: 'abcd',
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 16,
+    attribution: '&copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
   }).addTo(map);
 }
 
@@ -1557,20 +1577,69 @@ function eventMatchesFilter(ev) {
 
 function toggleExportMenu(event) {
   event.stopPropagation();
+  const sim = document.getElementById('sim-menu');
+  if (sim) sim.classList.remove('open');
   document.getElementById('export-menu').classList.toggle('open');
+}
+
+function toggleSimMenu(event) {
+  event.stopPropagation();
+  const exp = document.getElementById('export-menu');
+  if (exp) exp.classList.remove('open');
+  const sim = document.getElementById('sim-menu');
+  if (sim) sim.classList.toggle('open');
+}
+
+function triggerDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  if (filename) a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function exportEvents(format = 'csv') {
   document.getElementById('export-menu').classList.remove('open');
   if (format === 'ioc') {
-    const url = `/api/ioc?format=${encodeURIComponent(format)}&limit=1000`;
-    window.open(url, '_blank');
+    const url = `/api/ioc?format=json&limit=1000`;
+    triggerDownload(url, 'baitbox-ioc.json');
     showToast('📥 Exporting IOC threat feed…');
     return;
   }
+  if (format === 'stix') {
+    const url = `/api/ioc?format=stix&limit=1000`;
+    triggerDownload(url, 'baitbox-ioc.stix.json');
+    showToast('📥 Exporting STIX 2.1 Threat Intel…');
+    return;
+  }
   const url = `/api/events/export?format=${encodeURIComponent(format)}&limit=1000`;
-  window.open(url, '_blank');
+  triggerDownload(url, `baitbox-events.${format}`);
   showToast(`📥 Exporting events as ${format.toUpperCase()}…`);
+}
+
+async function triggerSim(scenario) {
+  const sim = document.getElementById('sim-menu');
+  if (sim) sim.classList.remove('open');
+  showToast(`⚡ Infiltrating: ${scenario.replace('_', ' ')}…`);
+  try {
+    const res = await fetch('/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario }),
+    });
+    const data = await res.json();
+    if (data && data.status === 'ok') {
+      showToast(`🎯 Injected ${data.events_generated} intrusion events`);
+      await fetchStats();
+      await fetchEvents();
+      await fetchAttackSummary();
+    } else {
+      showToast('Simulation failed', true);
+    }
+  } catch (err) {
+    showToast('Simulation error', true);
+  }
 }
 
 /* ── v2.3: MITRE ATT&CK live panel ────────────────────────────────────── */

@@ -176,3 +176,49 @@ def ioc_feed_to_ip_list(feed: dict[str, Any]) -> str:
     return "\n".join(m.get("ip", "") for m in feed.get("malicious_ips", []) if m.get("ip")) + (
         "\n" if feed.get("malicious_ips") else ""
     )
+
+
+def ioc_feed_to_stix(feed: dict[str, Any]) -> dict[str, Any]:
+    """Convert the IOC feed into a STIX 2.1 JSON bundle."""
+    import uuid as _uuid
+    import json as _json
+
+    bundle_id = f"bundle--{_uuid.uuid4()}"
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
+    objects: list[dict[str, Any]] = []
+
+    for m in feed.get("malicious_ips", []):
+        ip = m.get("ip")
+        if not ip:
+            continue
+        indicator_id = f"indicator--{_uuid.uuid4()}"
+        threat_level = m.get("threat_level", "LOW")
+        score = m.get("threat_score", 0)
+        protocols = ", ".join(m.get("protocols", [])) or "unknown"
+        
+        indicator = {
+            "type": "indicator",
+            "spec_version": "2.1",
+            "id": indicator_id,
+            "created": now_iso,
+            "modified": now_iso,
+            "name": f"Honeypot Attacker: {ip}",
+            "description": f"Observed suspicious activity on {protocols}. Threat score: {score}% ({threat_level}).",
+            "indicator_types": ["malicious-activity", "anonymizer" if m.get("blocked") else "attribution"],
+            "pattern": f"[ipv4-addr:value = '{ip}']",
+            "pattern_type": "stix",
+            "pattern_version": "2.1",
+            "valid_from": m.get("first_seen") or now_iso,
+            "confidence": min(score, 100),
+            "external_references": [
+                {"source_name": "baitbox-honeypot", "description": f"MITRE ATT&CK: {', '.join(m.get('mitre_techniques', []))}"}
+            ] if m.get("mitre_techniques") else [],
+        }
+        objects.append(indicator)
+
+    return {
+        "type": "bundle",
+        "id": bundle_id,
+        "objects": objects,
+    }
+
