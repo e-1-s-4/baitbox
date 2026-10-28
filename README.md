@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://img.shields.io/badge/CI-github--actions-green)](#)
-[![Tests](https://img.shields.io/badge/tests-310%20passing-brightgreen)](#)
+[![Tests](https://img.shields.io/badge/tests-315%20passing-brightgreen)](#)
 [![Version](https://img.shields.io/badge/version-2.3.0-purple)](#)
 
 > **BaitBox** is a zero-config, multi-protocol honeypot for homelabbers and security researchers. Drop attackers into a stateful fake filesystem, watch them try to pivot, and get real-time alerts — all from a beautiful cyber command-center dashboard.
@@ -84,8 +84,10 @@ This starts BaitBox with a PostgreSQL database for production workloads. See `do
 git clone https://github.com/e-1-s-4/baitbox.git
 cd baitbox
 pip install -r requirements.txt
-python -m baitbox.main
+python -m baitbox
 ```
+
+You can also `pip install -e .` and run the `baitbox` console script.
 
 (login: admin / admin)
 
@@ -123,7 +125,7 @@ The dashboard requires authentication. Default credentials:
 |---|---|---|
 | `BAITBOX_DASHBOARD_USER` | `admin` | Dashboard login username |
 | `BAITBOX_DASHBOARD_PASSWORD` | `admin` | Dashboard login password |
-| `BAITBOX_JWT_SECRET` | _(auto)_ | JWT signing secret — **change this in production** |
+| `BAITBOX_JWT_SECRET` | `baitbox-super-secret-key-change-me` | JWT signing secret — **change this in production** |
 
 All `/api/*` endpoints and the `/ws/feed` WebSocket require a valid JWT session cookie or bearer token. Unauthenticated API requests return **401 Unauthorized**, unauthenticated WebSocket handshakes are rejected with **403 Forbidden**, and unauthenticated dashboard visits are redirected to `/login`. Failed dashboard logins are rate-limited per IP (default: 10 attempts per 5 minutes → HTTP 429).
 
@@ -152,7 +154,7 @@ All settings are via environment variables:
 | `BAITBOX_WEBHOOK_TYPE` | `discord` | Webhook format: `discord`, `slack`, or `generic` |
 | `BAITBOX_DASHBOARD_USER` | `admin` | Dashboard login username |
 | `BAITBOX_DASHBOARD_PASSWORD` | `admin` | Dashboard login password |
-| `BAITBOX_JWT_SECRET` | _(auto)_ | JWT signing secret |
+| `BAITBOX_JWT_SECRET` | `baitbox-super-secret-key-change-me` | JWT signing secret |
 | `BAITBOX_JWT_EXPIRY_HOURS` | `24` | JWT token expiry time in hours |
 | `BAITBOX_SESSION_COOKIE_SECURE` | `0` | Set to `1` when the dashboard is served over HTTPS |
 | `BAITBOX_HTTP_MAX_BODY_BYTES` | `65536` | Max captured HTTP request body bytes per event |
@@ -174,6 +176,7 @@ All settings are via environment variables:
 | `BAITBOX_MAX_SESSION_COMMANDS` | `500` | v2.3: per-session command-history cap (memory bound) |
 | `BAITBOX_MAX_SESSIONS` | `1000` | v2.3: concurrent-session cap (stalest evicted) |
 | `BAITBOX_WEBHOOK_QUEUE_SIZE` | `500` | v2.3: bounded webhook delivery queue size |
+| `BAITBOX_SEED_DEMO_DATA` | `0` | Insert demo telemetry on first run (never enable in production) |
 
 ## 📈 Prometheus Metrics
 
@@ -214,6 +217,7 @@ For long-lived scraping, mint a bearer token once via `POST /api/auth/login` and
 | JSON (full feed) | `GET /api/ioc?format=json` | Threat-intel dashboards, SIEM |
 | CSV (flat table) | `GET /api/ioc?format=csv` | Spreadsheets, incident reports |
 | TXT (IP per line) | `GET /api/ioc?format=txt` | ipset / nginx deny / CrowdSec blocklists |
+| STIX 2.1 bundle | `GET /api/ioc?format=stix` | TAXII / MISP / threat-intel platforms |
 
 The JSON feed includes per-IP threat scores, MITRE ATT&CK techniques, first/last seen timestamps, captured usernames, sample commands, and probed HTTP paths — plus top credential pairs observed across all attackers.
 
@@ -252,12 +256,13 @@ Scores are displayed per-session on the dashboard and included in webhook notifi
 | `GET /logout` · `POST /logout` | No | Revoke the presented JWT (v2.3), clear session cookie, redirect to `/login` |
 | `GET /api/events?limit=100&offset=0` | Yes | Recent events (oldest-to-newest) with GeoIP enrichment; supports `protocol`, `src_ip`, `event_type` filters and `offset` pagination (v2.3) |
 | `GET /api/events/export?format=json\|csv\|cef\|ecs&limit=500` | Yes | Export recent events with threat scores for offline incident review |
-| `GET /api/ioc?format=json\|csv\|txt` | Yes | v2.3: Indicator-of-Compromise feed (malicious IPs, credentials, probed paths) |
+| `GET /api/ioc?format=json\|csv\|txt\|stix` | Yes | Indicator-of-Compromise feed (malicious IPs, credentials, probed paths, STIX 2.1) |
 | `GET /metrics` | Yes | v2.3: Prometheus metrics scrape endpoint |
 | `GET /api/stats` | Yes | Aggregate stats: totals, protocol splits, top IPs, passwords, HTTP paths, hourly timeline, blocked IPs |
 | `GET /api/sessions` | Yes | Active SSH/Telnet sessions with GeoIP data |
 | `GET /api/sessions/{id}/transcript` | Yes | v2.3: full per-command session transcript with exit codes |
 | `POST /api/sessions/{id}/kill` | Yes | Terminate an SSH session |
+| `POST /api/simulate` | Yes | Generate realistic demo attack traffic (`ssh_bruteforce`, `web_recon`, `shell_intrusion`, `critical_exploit`) |
 | `POST /api/block/{ip}` | Yes | Block an IP (persisted across restarts) and terminate all its sessions |
 | `POST /api/unblock/{ip}` | Yes | Unblock an IP |
 | `GET /api/geoip/{ip}` | Yes | Server-side GeoIP lookup with threat scoring (cached 1h, non-blocking) |
@@ -280,6 +285,7 @@ baitbox/
 │   ├── db_postgres.py     # PostgreSQL persistence backend
 │   ├── geoip.py           # Server-side GeoIP with threat scoring (non-blocking, evicting cache)
 │   ├── ioc.py             # v2.3: Indicator-of-Compromise feed builder (json/csv/txt)
+│   ├── __main__.py        # `python -m baitbox` entry point
 │   ├── main.py            # Entry point (starts all servers + retention task)
 │   ├── metrics.py         # v2.3: Prometheus text-exposition metrics builder
 │   ├── pubsub.py          # Asyncio pub/sub for WebSocket broadcasting
@@ -296,6 +302,7 @@ baitbox/
 │       ├── index.html     # Premium single-page dashboard (MITRE panel, filters, transcripts)
 │       └── login.html     # Login page
 ├── tests/
+│   ├── conftest.py          # Per-test database isolation + connection cleanup
 │   ├── test_anomaly.py      # Anomaly detection tests
 │   ├── test_anomaly_enhanced.py # Extended anomaly/scoring tests
 │   ├── test_api_v22.py      # Event filters / logout / export API tests
@@ -321,6 +328,7 @@ baitbox/
 │   ├── test_v23_security.py # v2.3: JWT revocation, proxy trust, metrics auth
 │   ├── test_v23_sessions.py # v2.3: memory caps, session manager, transcripts
 │   ├── test_v23_shell.py    # v2.3: new commands, exit codes, history -c
+│   ├── test_v24_enhanced.py # Simulation, STIX, decoy endpoint tests
 │   ├── test_vfs.py          # 50+ VFS tests
 │   ├── test_vfs_enhanced.py # Extended VFS tests
 │   └── test_webhooks.py     # Webhook formatting/queue delivery tests

@@ -926,6 +926,18 @@ class VirtualFilesystem:
                 return True
             return False
 
+    def remove_tree(self, path: str) -> bool:
+        """Recursively remove a directory, its contents, and their metadata."""
+        with self._lock:
+            if not self.is_dir(path):
+                return False
+            prefix = path if path.endswith("/") else path + "/"
+            doomed = [key for key in self.fs if key == path or key.startswith(prefix)]
+            for key in doomed:
+                self.fs.pop(key, None)
+                self._metadata.pop(key, None)
+            return True
+
     def rmdir(self, path: str) -> bool:
         with self._lock:
             if self.is_dir(path):

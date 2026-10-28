@@ -127,7 +127,7 @@ class TelemetryTests(unittest.TestCase):
 
 class SIEMExportAPITests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         tmp_db = str(Path(self.tmpdir.name) / "events.db")
         db.DB_NAME = tmp_db
         db_sqlite.DB_NAME = tmp_db
@@ -138,6 +138,7 @@ class SIEMExportAPITests(unittest.TestCase):
         self.headers = {"Authorization": f"Bearer {self.token}"}
 
     def tearDown(self):
+        asyncio.run(db_sqlite.close_connection())
         self.tmpdir.cleanup()
 
     def test_api_export_cef(self):

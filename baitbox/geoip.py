@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import threading
 import time
 import urllib.request
 import json
 from typing import Any
 
+from . import __version__
 from .config import settings
 
 logger = logging.getLogger("baitbox.geoip")
@@ -21,6 +23,16 @@ _TTL = 3600  # 1 hour
 # Bound the cache so scanners rotating across huge IP ranges cannot grow
 # memory without limit. Expired entries are evicted first, then oldest.
 _CACHE_MAX_ENTRIES = 4096
+
+# Bound outbound lookups so a burst of events from many new IPs cannot swamp
+# the free ip-api.com quota (45 req/min) or spawn an unbounded number of
+# worker threads.
+_MAX_INFLIGHT_LOOKUPS = 8
+_REMOTE_MIN_INTERVAL = 1.5  # seconds between outbound requests
+_inflight: set[str] = set()
+_inflight_lock = threading.Lock()
+_last_remote_at = 0.0
+_remote_lock = threading.Lock()
 
 # Known Tor exit node ranges / suspicious ASN keywords (heuristic)
 _SUSPICIOUS_ASN_KEYWORDS = {
@@ -42,6 +54,11 @@ def _cache_put(ip: str, data: dict[str, Any], expires: float) -> None:
             for k, _ in oldest:
                 del _CACHE[k]
     _CACHE[ip] = {"data": data, "expires": expires}
+
+
+def cache_geo(ip: str, data: dict[str, Any], ttl: int = _TTL) -> None:
+    """Prime the in-memory GeoIP cache (used by demo seeding and simulation)."""
+    _cache_put(ip, dict(data), time.time() + ttl)
 
 
 def _is_private(ip: str) -> bool:
@@ -105,10 +122,25 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
 
     data: dict[str, Any] = _unknown_geoip(ip)
 
+    with _inflight_lock:
+        if len(_inflight) >= _MAX_INFLIGHT_LOOKUPS:
+            data["reason"] = "busy"
+            _cache_put(ip, data, now + 60)
+            return data
+        _inflight.add(ip)
     try:
         data = await _lookup_remote(ip, data)
     except Exception as exc:
         logger.debug("GeoIP lookup failed for %s: %s", ip, exc)
+    finally:
+        with _inflight_lock:
+            _inflight.discard(ip)
+
+    # Only cache successful answers for the full TTL. Failures/throttling get
+    # a short negative cache so a transient outage is retried soon.
+    if data.get("reason"):
+        _cache_put(ip, data, now + 60)
+        return data
 
     _cache_put(ip, data, now + _TTL)
     try:
@@ -121,11 +153,20 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
 
 async def _lookup_remote(ip: str, fallback: dict[str, Any]) -> dict[str, Any]:
     """Query ip-api.com without blocking the event loop (runs in a thread)."""
+    global _last_remote_at
+    now = time.time()
+    with _remote_lock:
+        if now - _last_remote_at < _REMOTE_MIN_INTERVAL:
+            throttled = dict(fallback)
+            throttled["reason"] = "throttled"
+            return throttled
+        _last_remote_at = now
+
     # ip-api.com free tier: 45 req/min, no API key needed
     url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp,org,proxy,hosting"
 
     def _fetch() -> dict[str, Any] | None:
-        req = urllib.request.Request(url, headers={"User-Agent": "BaitBox/2.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": f"BaitBox/{__version__}"})
         with urllib.request.urlopen(req, timeout=4) as resp:
             return json.loads(resp.read().decode())
 
@@ -148,6 +189,7 @@ async def _lookup_remote(ip: str, fallback: dict[str, Any]) -> dict[str, Any]:
         "org": raw.get("org", "Unknown"),
         "threat_score": _threat_score(raw),
     })
+    data.pop("reason", None)
     return data
 
 

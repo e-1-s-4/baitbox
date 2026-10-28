@@ -1,5 +1,44 @@
+# Byte-code / caches
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime databases (SQLite + WAL/SHM sidecars)
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Generated SSH host keys
+host_key
+*.pem
+
+# Local configuration / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# AI Studio scratch artifacts
+.aistudio/
+
+# Build outputs
+build/
+dist/
+*.egg-info/

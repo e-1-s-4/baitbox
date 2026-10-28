@@ -49,7 +49,7 @@ def record_connection(ip: str, protocol: str = "SSH") -> None:
 
 
 def prune_connection_log(max_ips: int = 5000, idle_secs: float = 600.0) -> int:
-    """Remove tracking entries for IPs that stopped connecting recently."""
+    """Remove idle tracking entries and enforce a hard cap on tracked IPs."""
     now = time.time()
     with _LOCK:
         stale = [
@@ -58,7 +58,16 @@ def prune_connection_log(max_ips: int = 5000, idle_secs: float = 600.0) -> int:
         ]
         for ip in stale:
             del _CONN_LOG[ip]
-        return len(stale)
+        removed = len(stale)
+        # A fast botnet rotating source IPs can still exceed the cap within the
+        # idle window; evict the least recently seen entries beyond it.
+        overflow = len(_CONN_LOG) - max_ips
+        if overflow > 0:
+            oldest = sorted(_CONN_LOG.items(), key=lambda kv: kv[1][-1] if kv[1] else 0)[:overflow]
+            for ip, _ in oldest:
+                del _CONN_LOG[ip]
+            removed += overflow
+        return removed
 
 
 def is_blocked(ip: str) -> bool:

@@ -16,7 +16,7 @@ from baitbox.servers.http_server import app
 
 
 def _setup_client():
-    tmpdir = tempfile.TemporaryDirectory()
+    tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
     tmp_db = str(Path(tmpdir.name) / "events.db")
     db.DB_NAME = tmp_db
     db_sqlite.DB_NAME = tmp_db

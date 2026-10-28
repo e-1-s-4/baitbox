@@ -46,15 +46,24 @@ WELCOME = (
 def _load_host_key() -> paramiko.PKey:
     """Load a stable host key when configured, otherwise create an ephemeral key."""
     if not settings.ssh_host_key:
-        return paramiko.RSAKey.generate(1024)
+        return paramiko.RSAKey.generate(2048)
 
     key_path = Path(settings.ssh_host_key).expanduser()
     if key_path.exists():
-        return paramiko.RSAKey.from_private_key_file(str(key_path))
+        try:
+            return paramiko.RSAKey.from_private_key_file(str(key_path))
+        except Exception as exc:
+            # A truncated/corrupt key on the volume must not stop the honeypot;
+            # regenerate it instead of crashing at import time.
+            logger.warning("Could not load host key %s (%s) — regenerating", key_path, exc)
 
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key = paramiko.RSAKey.generate(1024)
-    key.write_private_key_file(str(key_path))
+    key = paramiko.RSAKey.generate(2048)
+    try:
+        key.write_private_key_file(str(key_path))
+        key_path.chmod(0o600)
+    except OSError as exc:
+        logger.warning("Could not persist host key %s: %s", key_path, exc)
     return key
 
 
@@ -82,6 +91,15 @@ class FakeShell(paramiko.ServerInterface):
     def check_auth_interactive(self, username: str, submethods: str) -> int:
         self.username = username
         _log_from_thread(self.client_ip, "auth_attempt", {"username": username, "method": "keyboard-interactive"})
+        return paramiko.AUTH_SUCCESSFUL
+
+    def check_auth_interactive_response(self, responses: list[str]) -> int:
+        """Complete keyboard-interactive auth after any client responses."""
+        _log_from_thread(
+            self.client_ip,
+            "auth_attempt",
+            {"username": self.username, "method": "keyboard-interactive-response", "responses": len(responses)},
+        )
         return paramiko.AUTH_SUCCESSFUL
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
@@ -852,10 +870,20 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             lines = []
             for item in items:
                 item_path = (target_dir if target_dir.endswith("/") else target_dir + "/") + item
-                is_dir = session.vfs.is_dir(item_path)
-                perm = "drwxr-xr-x" if is_dir else "-rw-r--r--"
-                size = 4096 if is_dir else len(session.vfs.read_file(item_path) or b"")
-                lines.append(f"{perm} 1 root root {size:7d} Jun 28 14:01 {item}")
+                info = session.vfs.stat(item_path)
+                if not info:
+                    continue
+                mtime = info.get("mtime") or 0
+                date_str = time.strftime("%b %e %H:%M", time.localtime(mtime)) if mtime else "Jan  1 00:00"
+                label = item
+                if info.get("type") == "symlink":
+                    link_target = session.vfs.readlink(item_path)
+                    if link_target:
+                        label = f"{item} -> {link_target}"
+                lines.append(
+                    f"{info['mode']} 1 {info['owner']} {info['group']} "
+                    f"{info['size']:7d} {date_str} {label}"
+                )
             return ("\r\n".join(lines) + "\r\n").encode(), False
         elif piped:
             # Real ls emits one entry per line when stdout is not a TTY
@@ -959,28 +987,29 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         return b"", False
 
     if executable == "rm":
-        if not args:
-            return b"rm: missing operand\r\n", False
         recursive = False
+        force = False
         targets = []
         for target in args:
-            if target in {"-r", "-rf", "-f", "-fr"}:
-                recursive = True
+            if target.startswith("-") and target != "-":
+                if "r" in target or "R" in target:
+                    recursive = True
+                if "f" in target:
+                    force = True
             else:
                 targets.append(target)
+        if not targets:
+            return (b"" if force else b"rm: missing operand\r\n"), False
         for target in targets:
             target_path = session.vfs._normalize_path(session.cwd, target)
             if session.vfs.is_file(target_path):
                 session.vfs.rm(target_path)
             elif session.vfs.is_dir(target_path):
                 if recursive:
-                    prefix = target_path if target_path.endswith("/") else target_path + "/"
-                    keys_to_del = [k for k in list(session.vfs.fs.keys()) if k == target_path or k.startswith(prefix)]
-                    for k in keys_to_del:
-                        del session.vfs.fs[k]
+                    session.vfs.remove_tree(target_path)
                 else:
                     return f"rm: cannot remove '{target}': Is a directory\r\n".encode(), False
-            else:
+            elif not force:
                 return f"rm: cannot remove '{target}': No such file or directory\r\n".encode(), False
         return b"", False
 
@@ -1088,14 +1117,38 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         return ("\r\n".join(content.decode("utf-8", errors="replace").splitlines()[:count]) + "\r\n").encode(), False
 
     if executable == "tail":
-        if not args:
+        count = 10
+        files = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "-n" and i + 1 < len(args):
+                try:
+                    count = max(0, int(args[i + 1]))
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if arg.startswith("-n") and len(arg) > 2:
+                try:
+                    count = max(0, int(arg[2:]))
+                except ValueError:
+                    pass
+            elif arg.startswith("-") and arg[1:].isdigit():
+                count = max(0, int(arg[1:]))
+            elif not arg.startswith("-"):
+                files.append(arg)
+            i += 1
+        if not files:
             return b"tail: missing file operand\r\n", False
-        target = [a for a in args if not a.startswith("-")][-1]
+        target = files[-1]
         target_path = session.vfs._normalize_path(session.cwd, target)
         content = session.vfs.read_file(target_path)
         if content is None:
             return f"tail: cannot open '{target}' for reading: No such file or directory\r\n".encode(), False
-        return ("\r\n".join(content.decode("utf-8", errors="replace").splitlines()[-10:]) + "\r\n").encode(), False
+        all_lines = content.decode("utf-8", errors="replace").splitlines()
+        selected = all_lines[-count:] if count > 0 else []
+        return ("\r\n".join(selected) + "\r\n").encode() if selected else b"", False
 
     if executable in {"wget", "curl"}:
         url = _expand_vars(next((a for a in args if not a.startswith("-")), "index.html"), session)

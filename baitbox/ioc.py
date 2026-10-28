@@ -180,8 +180,8 @@ def ioc_feed_to_ip_list(feed: dict[str, Any]) -> str:
 
 def ioc_feed_to_stix(feed: dict[str, Any]) -> dict[str, Any]:
     """Convert the IOC feed into a STIX 2.1 JSON bundle."""
+    import ipaddress as _ipaddress
     import uuid as _uuid
-    import json as _json
 
     bundle_id = f"bundle--{_uuid.uuid4()}"
     now_iso = dt.datetime.now(dt.UTC).isoformat()
@@ -191,11 +191,18 @@ def ioc_feed_to_stix(feed: dict[str, Any]) -> dict[str, Any]:
         ip = m.get("ip")
         if not ip:
             continue
+        try:
+            addr_type = "ipv4-addr" if _ipaddress.ip_address(ip).version == 4 else "ipv6-addr"
+        except ValueError:
+            continue
         indicator_id = f"indicator--{_uuid.uuid4()}"
         threat_level = m.get("threat_level", "LOW")
         score = m.get("threat_score", 0)
         protocols = ", ".join(m.get("protocols", [])) or "unknown"
-        
+        indicator_types = ["malicious-activity"]
+        if m.get("blocked"):
+            indicator_types.append("anonymization")
+
         indicator = {
             "type": "indicator",
             "spec_version": "2.1",
@@ -204,8 +211,8 @@ def ioc_feed_to_stix(feed: dict[str, Any]) -> dict[str, Any]:
             "modified": now_iso,
             "name": f"Honeypot Attacker: {ip}",
             "description": f"Observed suspicious activity on {protocols}. Threat score: {score}% ({threat_level}).",
-            "indicator_types": ["malicious-activity", "anonymizer" if m.get("blocked") else "attribution"],
-            "pattern": f"[ipv4-addr:value = '{ip}']",
+            "indicator_types": indicator_types,
+            "pattern": f"[{addr_type}:value = '{ip}']",
             "pattern_type": "stix",
             "pattern_version": "2.1",
             "valid_from": m.get("first_seen") or now_iso,

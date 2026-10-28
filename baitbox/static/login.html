@@ -255,7 +255,7 @@
         <span>⚠️</span> <span id="error-msg">Invalid credentials. Access Denied.</span>
       </div>
 
-      <div class="demo-hint" style="background: rgba(0, 245, 160, 0.08); border: 1px solid rgba(0, 245, 160, 0.25); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 20px; font-family: var(--font-mono); font-size: 11px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+      <div class="demo-hint" id="demo-hint" style="background: rgba(0, 245, 160, 0.08); border: 1px solid rgba(0, 245, 160, 0.25); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 20px; font-family: var(--font-mono); font-size: 11px; display: none; align-items: center; justify-content: space-between; gap: 8px;">
         <div>
           <span style="color: var(--green); font-weight: 700;">DEFAULT ACCESS:</span>
           <span style="color: var(--text-secondary); margin-left: 6px;">admin / admin</span>
@@ -287,7 +287,9 @@
     BaitBox Honeypot System v2.3 — For authorized security research only.
   </div>
 
+  <!--DEMO_FLAG-->
   <script>
+    const demoEnabled = window.BAITBOX_DEMO === true;
     const usernameInput = document.getElementById('username');
     const passwordInput = document.getElementById('password');
     const submitBtn = document.getElementById('submit-btn');
@@ -345,18 +347,22 @@
       await performLogin();
     });
 
-    if (quickFillBtn) {
-      quickFillBtn.addEventListener('click', () => {
+    if (demoEnabled) {
+      const demoHint = document.getElementById('demo-hint');
+      if (demoHint) demoHint.style.display = 'flex';
+      if (quickFillBtn) {
+        quickFillBtn.addEventListener('click', () => {
+          fillDemo();
+          performLogin();
+        });
+      }
+      // ?autostart=1 / ?demo=1 shortcut is only honoured while the shipped
+      // default credentials are still in effect.
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('autostart') === '1' || params.get('demo') === '1') {
         fillDemo();
         performLogin();
-      });
-    }
-
-    // Support ?autostart=1 or ?demo=1 query parameter to skip manual login
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('autostart') === '1' || params.get('demo') === '1') {
-      fillDemo();
-      performLogin();
+      }
     }
   </script>
 </body>

@@ -2,6 +2,29 @@
 
 All notable changes to BaitBox are documented here.
 
+## [Unreleased]
+
+### Fixed
+- **Docker build**: the unprivileged `honeypot` user is created before the code is copied, so `COPY --chown` no longer fails; the image also pins `BAITBOX_DASHBOARD_PORT=8000`.
+- **Default dashboard port** is now consistently `8000` (config previously defaulted to `3000` while Docker, compose, docs and the dashboard all used `8000`).
+- **Test suite** is fully isolated and exits cleanly: every test gets its own SQLite file, the shared `aiosqlite` connection is closed after each test (no more Windows `WinError 32` or hanging non-daemon threads), and no `baitbox.db` is left in the checkout.
+- **HTTP body capture** now streams and caps reads at `BAITBOX_HTTP_MAX_BODY_BYTES` instead of buffering oversized uploads in memory.
+- **GeoIP lookups** are throttled and bounded in flight, failures are no longer cached for a full hour, and demo/simulation seeding uses a public cache helper.
+- **SIEM/IOC exports**: event exports now carry MITRE techniques and attack categories, the CSV includes a `mitre_techniques` column, and STIX output uses valid indicator types plus IPv6 patterns.
+- **Shell fidelity**: `rm -rf` removes directory trees under the VFS lock (metadata included), `tail -n <N>` honours the requested count, and `ls -l` reports real mode/owner/group/mtime and symlink targets from the VFS.
+- **SQLite hourly stats** compare against a matching ISO-8601 cutoff (previous query mixed `T` and space-separated formats).
+- **Session counts** now report the true total commands executed, even after the bounded history window rolls over.
+- **Windows shutdown** completes gracefully when `loop.add_signal_handler` is unavailable; the process releases the database instead of hanging.
+- **Bounded memory**: login-failure tracking and the connection log are capped (idle entries evicted, then oldest), and the dashboard demo-credential hint only appears while the shipped defaults are still active.
+- **SSH host keys** are now 2048-bit RSA and a corrupt/truncated persisted key is regenerated instead of crashing startup; keyboard-interactive response handling was added.
+- **Demo telemetry seeding is opt-in** (`BAITBOX_SEED_DEMO_DATA=1`) so fabricated attackers never pollute production data.
+- API documentation routes (`/docs`, `/redoc`, `/openapi.json`) are disabled so honeypot visitors cannot enumerate the real API surface.
+
+### Added
+- `.env.example`, `.dockerignore`, and the GitHub Actions CI workflow (pytest 3.11/3.12 + Docker build).
+- `python -m baitbox` entry point and a `baitbox` console script; `pyproject.toml` now declares runtime dependencies and package data.
+- STIX 2.1 output for the IOC feed (`/api/ioc?format=stix`).
+
 ## [2.3.0] — 2026-10-18
 
 ### Added

@@ -56,7 +56,7 @@ async def seed_initial_telemetry() -> None:
     """Populate baseline telemetry if database is empty so dashboard is immediately rich and interactive."""
     from .db import get_recent_events, log_event
     from .ratelimit import record_connection
-    from .geoip import _cache_put, _TTL
+    from .geoip import cache_geo
     import time
 
     try:
@@ -87,13 +87,12 @@ async def seed_initial_telemetry() -> None:
              {"city": "São Paulo", "country": "Brazil", "countryCode": "BR", "lat": -23.5505, "lon": -46.6333, "isp": "Telnet Botnet ISP", "threat_score": 90}),
         ]
 
-        now = time.time()
         for ip, proto, ev_type, payload, geo in seeds:
             await log_event(ip, proto, ev_type, payload)
             record_connection(ip, proto)
             geo_data = dict(geo)
             geo_data["ip"] = ip
-            _cache_put(ip, geo_data, now + _TTL)
+            cache_geo(ip, geo_data)
         logger.info("Seeded %s baseline telemetry events for immediate interactive command center", len(seeds))
     except Exception as exc:
         logger.debug("Telemetry seeding skipped: %s", exc)
@@ -101,7 +100,7 @@ async def seed_initial_telemetry() -> None:
 
 async def main() -> None:
     """Main entry point that initializes and starts all honeypot servers."""
-    logger.info("Starting BaitBox honeypot...")
+    logger.info("Starting BaitBox honeypot v%s...", __version__)
     loop = asyncio.get_running_loop()
     set_main_loop(loop)
 
@@ -120,7 +119,8 @@ async def main() -> None:
     try:
         await init_db()
         logger.info("Database initialized successfully")
-        await seed_initial_telemetry()
+        if settings.seed_demo_data:
+            await seed_initial_telemetry()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
@@ -142,7 +142,7 @@ async def main() -> None:
 
     if settings.dashboard_password == "admin" or settings.jwt_secret == "baitbox-super-secret-key-change-me":
         console.print(
-            "[bold yellow]⚠  Using default dashboard credentials or JWT secret — "
+            "[bold yellow]WARNING: Using default dashboard credentials or JWT secret - "
             "set BAITBOX_DASHBOARD_PASSWORD and BAITBOX_JWT_SECRET in production.[/bold yellow]"
         )
         logger.warning("Using default credentials - please change in production")
@@ -170,11 +170,36 @@ async def main() -> None:
         except NotImplementedError:
             pass
 
-    await _SHUTDOWN.wait()
+    # Wait for either our own signal handler or an independent exit of the
+    # HTTP server (uvicorn installs its own Ctrl+C handler on Windows, where
+    # loop.add_signal_handler is unavailable).
+    shutdown_waiter = asyncio.create_task(_SHUTDOWN.wait())
+    try:
+        await asyncio.wait({shutdown_waiter, serve_task}, return_when=asyncio.FIRST_COMPLETED)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Windows event loops do not support add_signal_handler, so Ctrl+C is
+        # delivered as task cancellation. Clear the cancellation request so the
+        # cleanup awaits below can complete normally.
+        current = asyncio.current_task()
+        if current is not None and hasattr(current, "uncancel"):
+            current.uncancel()
+        logger.info("Shutdown signal received")
+    finally:
+        shutdown_waiter.cancel()
+        try:
+            await shutdown_waiter
+        except asyncio.CancelledError:
+            pass
+
     logger.info("Shutting down BaitBox...")
-    console.print("\n[dim]Shutting down BaitBox…[/dim]")
+    console.print("\n[dim]Shutting down BaitBox...[/dim]")
     server.should_exit = True
-    await serve_task
+    try:
+        await serve_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error("HTTP server exited with an error: %s", exc)
 
     if telnet_task is not None:
         telnet_task.cancel()
@@ -200,5 +225,14 @@ async def main() -> None:
     logger.info("BaitBox shutdown complete")
 
 
+def cli() -> None:
+    """Synchronous entry point used by the console script and ``python -m``."""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("BaitBox interrupted")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()
+

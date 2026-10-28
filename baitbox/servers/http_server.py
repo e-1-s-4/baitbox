@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -18,7 +19,7 @@ from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDiscon
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..db import close_db, get_recent_events, get_stats, log_event, persist_blocked_ip, persist_unblocked_ip
+from ..db import get_recent_events, get_stats, log_event, persist_blocked_ip, persist_unblocked_ip
 from .. import __version__
 from ..pubsub import pubsub
 from ..ratelimit import (
@@ -116,10 +117,25 @@ def _client_key(request_or_ip: Any) -> str:
     return _client_ip(request_or_ip)
 
 
+_MAX_LOGIN_TRACKED_IPS = 2048
+
+
 def _record_login_failure(ip: str) -> None:
     with _login_lock:
         now = time.time()
         window_start = now - settings.login_rate_window_secs
+        # Bound memory: a distributed attacker rotating source IPs must not be
+        # able to grow this map without limit. Evict IPs whose whole failure
+        # window has expired before falling back to a full reset.
+        if len(_login_failures) >= _MAX_LOGIN_TRACKED_IPS and ip not in _login_failures:
+            stale = [
+                key for key, times in _login_failures.items()
+                if not times or times[-1] < window_start
+            ]
+            for key in stale:
+                _login_failures.pop(key, None)
+            if len(_login_failures) >= _MAX_LOGIN_TRACKED_IPS:
+                _login_failures.clear()
         failures = [t for t in _login_failures.get(ip, []) if t >= window_start]
         failures.append(now)
         _login_failures[ip] = failures
@@ -146,14 +162,20 @@ async def verify_user_credentials(username: str, password: str) -> bool:
     timing does not reveal which usernames exist.
     """
     password_hash = await get_user_password_hash(username)
+    password_bytes = password.encode("utf-8")
     if not password_hash:
         try:
-            bcrypt.checkpw(password.encode("utf-8"), _DUMMY_PASSWORD_HASH.encode("utf-8"))
+            # bcrypt is deliberately slow; keep it off the event loop.
+            await asyncio.to_thread(
+                bcrypt.checkpw, password_bytes, _DUMMY_PASSWORD_HASH.encode("utf-8")
+            )
         except Exception:
             pass
         return False
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+        return await asyncio.to_thread(
+            bcrypt.checkpw, password_bytes, password_hash.encode("utf-8")
+        )
     except Exception:
         return False
 
@@ -267,6 +289,10 @@ app = FastAPI(
     title="BaitBox",
     description="A lightweight honeypot with a real-time dashboard.",
     version=APP_VERSION,
+    # Never advertise the real API surface to honeypot visitors.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AuthMiddleware)
@@ -599,21 +625,46 @@ def _enrich_event(event: dict[str, Any]) -> dict[str, Any]:
         event["threat_score"] = threat["threat_score"]
         event["threat_level"] = threat["threat_level"]
         event["threat_reasons"] = threat["reasons"]
+        event["mitre_techniques"] = threat.get("mitre_techniques", [])
+        event["attack_categories"] = threat.get("attack_categories", [])
     except Exception:
         pass
     return event
 
 
 async def _request_payload(request: Request) -> dict[str, Any]:
-    """Safely extract and truncate request payload for logging."""
-    try:
-        body = await request.body()
-    except Exception:
-        body = b""
-    
-    truncated = len(body) > settings.http_max_body_bytes
-    if truncated:
-        body = body[: settings.http_max_body_bytes]
+    """Safely extract and truncate request payload for logging.
+
+    Reads the body incrementally so an oversized upload is capped at
+    ``http_max_body_bytes`` instead of being buffered in memory in full.
+    """
+    max_bytes = max(0, settings.http_max_body_bytes)
+    truncated = False
+    stream = getattr(request, "stream", None)
+    if stream is None:  # lightweight request doubles in tests have only body()
+        try:
+            body = await request.body()
+        except Exception:
+            body = b""
+        truncated = len(body) > max_bytes
+        body = body[:max_bytes]
+    else:
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async for chunk in stream():
+                remaining = max_bytes - total
+                if len(chunk) > remaining:
+                    if remaining > 0:
+                        chunks.append(chunk[:remaining])
+                        total += remaining
+                    truncated = True
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        except Exception:
+            truncated = True
+        body = b"".join(chunks)
 
     form_data: dict[str, Any] = {}
     if body:
@@ -656,7 +707,14 @@ async def _record_http_request(request: Request, event_type: str = "request") ->
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page() -> str:
-    return LOGIN_HTML.read_text(encoding="utf-8")
+    html = LOGIN_HTML.read_text(encoding="utf-8")
+    # Only advertise/auto-fill the demo credentials while the shipped defaults
+    # are still in effect — never leak a stale password hint in production.
+    if settings.dashboard_username == "admin" and settings.dashboard_password == "admin":
+        flag = "<script>window.BAITBOX_DEMO = true;</script>"
+    else:
+        flag = ""
+    return html.replace("<!--DEMO_FLAG-->", flag)
 
 
 @app.post("/login")
@@ -780,15 +838,21 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
             output,
             fieldnames=[
                 "id", "timestamp", "src_ip", "protocol", "event_type",
-                "threat_score", "threat_level", "payload",
+                "threat_score", "threat_level", "mitre_techniques", "payload",
             ],
         )
         writer.writeheader()
-        for event in events:
+        for raw_event in events:
+            event = _enrich_event(dict(raw_event))
             writer.writerow({
-                **event,
+                "id": event.get("id", ""),
+                "timestamp": event.get("timestamp", ""),
+                "src_ip": event.get("src_ip", ""),
+                "protocol": event.get("protocol", ""),
+                "event_type": event.get("event_type", ""),
                 "threat_score": event.get("threat_score", ""),
                 "threat_level": event.get("threat_level", ""),
+                "mitre_techniques": ";".join(event.get("mitre_techniques", []) or []),
                 "payload": json.dumps(event.get("payload", {}), sort_keys=True, default=str),
             })
         return Response(
@@ -809,7 +873,8 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
         ecs_docs = [export_ecs_event(_enrich_event(dict(ev))) for ev in events]
         return JSONResponse({"events": ecs_docs, "count": len(ecs_docs)})
 
-    return JSONResponse({"events": events, "count": len(events)})
+    enriched = [_enrich_event(dict(ev)) for ev in events]
+    return JSONResponse({"events": enriched, "count": len(enriched)})
 
 
 @app.get("/api/attack-summary")

@@ -7,21 +7,26 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
+def _empty_metrics() -> Dict[str, Any]:
+    """Return a fresh zeroed metrics record for an IP."""
+    return {
+        "auth_attempts": [],
+        "commands": [],
+        "high_risk_detected": False,
+        "priv_esc_detected": False,
+        "file_access_detected": False,
+        "cryptominer_detected": False,
+        "reverse_shell_detected": False,
+        "exploit_detected": False,
+        "recon_detected": False,
+        "matched_indicators": [],
+        "mitre_techniques": set(),
+    }
+
+
 # In-memory store for IP metrics
 # {ip: {"auth_attempts": [timestamps], "commands": [timestamps], ...}}
-_ip_metrics: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-    "auth_attempts": [],
-    "commands": [],
-    "high_risk_detected": False,
-    "priv_esc_detected": False,
-    "file_access_detected": False,
-    "cryptominer_detected": False,
-    "reverse_shell_detected": False,
-    "exploit_detected": False,
-    "recon_detected": False,
-    "matched_indicators": [],
-    "mitre_techniques": set(),
-})
+_ip_metrics: Dict[str, Dict[str, Any]] = defaultdict(_empty_metrics)
 
 # Global attack statistics for telemetry dashboards
 _attack_stats: Dict[str, int] = defaultdict(int)
@@ -273,7 +278,9 @@ def get_threat_score(ip: str) -> Dict[str, Any]:
     Calculate the cumulative threat score and level for a given IP address.
     Returns a dict with threat_score, threat_level, reasons, indicators, and MITRE techniques.
     """
-    metrics = _ip_metrics[ip]
+    # Use .get() so querying an IP we have never observed does not create an
+    # entry (dashboard/IOC reads would otherwise grow the map without bound).
+    metrics = _ip_metrics.get(ip) or _empty_metrics()
     now = time.time()
 
     # Clean up old timestamps

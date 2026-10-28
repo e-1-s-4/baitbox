@@ -14,7 +14,7 @@ from baitbox.servers.http_server import app, create_jwt_token, verify_jwt_token,
 
 class AuthTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old_db_name = db.DB_NAME
         self.old_sqlite_db_name = db_sqlite.DB_NAME
         tmp_db = str(Path(self.tmpdir.name) / "events.db")
@@ -32,6 +32,7 @@ class AuthTests(unittest.TestCase):
     def tearDown(self):
         db.DB_NAME = self.old_db_name
         db_sqlite.DB_NAME = self.old_sqlite_db_name
+        asyncio.run(db_sqlite.close_connection())
         self.tmpdir.cleanup()
 
     def test_verify_jwt_token(self):

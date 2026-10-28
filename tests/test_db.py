@@ -9,7 +9,7 @@ from baitbox import db_sqlite
 
 class DatabaseTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old_db_name = db.DB_NAME
         self.old_sqlite_db_name = db_sqlite.DB_NAME
         tmp_db = str(Path(self.tmpdir.name) / "events.db")
@@ -19,6 +19,7 @@ class DatabaseTests(unittest.TestCase):
     def tearDown(self):
         db.DB_NAME = self.old_db_name
         db_sqlite.DB_NAME = self.old_sqlite_db_name
+        asyncio.run(db_sqlite.close_connection())
         self.tmpdir.cleanup()
 
     def test_event_round_trip_decodes_payload_and_orders_oldest_first(self):
@@ -44,7 +45,7 @@ class DatabaseTests(unittest.TestCase):
 
 class GeoIPCacheTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old_db_name = db.DB_NAME
         self.old_sqlite_db_name = db_sqlite.DB_NAME
         tmp_db = str(Path(self.tmpdir.name) / "events.db")
@@ -54,6 +55,7 @@ class GeoIPCacheTests(unittest.TestCase):
     def tearDown(self):
         db.DB_NAME = self.old_db_name
         db_sqlite.DB_NAME = self.old_sqlite_db_name
+        asyncio.run(db_sqlite.close_connection())
         self.tmpdir.cleanup()
 
     def test_geoip_cache_round_trip_and_expiry(self):

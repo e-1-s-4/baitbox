@@ -42,6 +42,7 @@ class SSHSession:
         # not grow memory without bound. Newest entries are always kept.
         from .config import settings
         self.commands: deque[Dict[str, Any]] = deque(maxlen=settings.max_session_commands)
+        self._total_commands = 0
 
         # Initialize a custom virtual filesystem for this session
         from .vfs import VirtualFilesystem
@@ -56,10 +57,11 @@ class SSHSession:
         if exit_code is not None:
             entry["exit_code"] = exit_code
         self.commands.append(entry)
+        self._total_commands += 1
 
     def command_count(self) -> int:
         """Total commands executed this session (may exceed the stored window)."""
-        return getattr(self, "_total_commands", len(self.commands))
+        return self._total_commands
 
     def close(self) -> None:
         for obj in (self.channel, self.transport):
@@ -162,7 +164,7 @@ class SessionManager:
                 "duration_seconds": round(time.time() - s.login_time, 2),
                 "idle_seconds": round(time.time() - s.last_seen, 2),
                 "cwd": s.cwd,
-                "command_count": len(s.commands),
+                "command_count": s.command_count(),
                 "commands": list(s.commands)[-10:]  # last 10 commands
             })
         return res

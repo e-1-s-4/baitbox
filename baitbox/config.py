@@ -21,7 +21,7 @@ class Settings:
     ssh_host: str = os.getenv("BAITBOX_SSH_HOST", "0.0.0.0")
     ssh_port: int = _safe_int("BAITBOX_SSH_PORT", 2222)
     dashboard_host: str = os.getenv("BAITBOX_DASHBOARD_HOST", "0.0.0.0")
-    dashboard_port: int = _safe_int("BAITBOX_DASHBOARD_PORT", _safe_int("PORT", 3000))
+    dashboard_port: int = _safe_int("BAITBOX_DASHBOARD_PORT", _safe_int("PORT", 8000))
     database_path: str = os.getenv("BAITBOX_DB", "baitbox.db")
     max_events: int = _safe_int("BAITBOX_MAX_EVENTS", 100)
     ssh_host_key: str = os.getenv("BAITBOX_SSH_HOST_KEY", "")
@@ -88,6 +88,11 @@ class Settings:
     # Webhook delivery: bounded queue + single worker (prevents thread
     # explosion during credential-stuffing floods)
     webhook_queue_size: int = _safe_int("BAITBOX_WEBHOOK_QUEUE_SIZE", 500)
+
+    # Insert a handful of realistic demo events on first start when the
+    # database is empty. Off by default so production telemetry is never
+    # polluted with fabricated attackers.
+    seed_demo_data: bool = os.getenv("BAITBOX_SEED_DEMO_DATA", "0").lower() in ("1", "true", "yes")
 
 
 settings = Settings()

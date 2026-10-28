@@ -2,5 +2,5 @@
   "name": "BaitBox Honeypot",
   "description": "Zero-config multi-protocol honeypot with real-time attack detection and cyber command center dashboard",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

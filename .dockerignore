@@ -1,0 +1,27 @@
+# Build context exclusions — keeps the image small and avoids leaking local
+# secrets, databases and generated host keys into the build context.
+.git
+.gitignore
+.github
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.db
+*.db-wal
+*.db-shm
+host_key
+.aistudio
+.env
+.env.*
+!.env.example
+tests
+docs
+*.md
+!README.md
+!LICENSE

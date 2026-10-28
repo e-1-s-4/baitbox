@@ -25,7 +25,9 @@ _GENERIC_PAYLOAD_LIMIT = 60000
 
 _THREAT_RANK = {"LOW": 0, "MEDIUM": 1, "CRITICAL": 2}
 
-_delivery_queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=500)
+_delivery_queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(
+    maxsize=max(1, settings.webhook_queue_size)
+)
 _worker_started = False
 _worker_lock = threading.Lock()
 _dropped_count = 0

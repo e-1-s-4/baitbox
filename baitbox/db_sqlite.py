@@ -30,7 +30,11 @@ async def _get_db() -> aiosqlite.Connection:
             pass
         _connection = None
     if _connection is None:
-        _connection = await aiosqlite.connect(DB_NAME)
+        # aiosqlite.Connection is a Thread; mark it daemon so a fatal startup
+        # error can never leave the interpreter alive waiting on the worker.
+        connection = aiosqlite.connect(DB_NAME)
+        connection.daemon = True
+        _connection = await connection
         _connection.row_factory = aiosqlite.Row
         # WAL mode allows concurrent readers during writes
         try:
@@ -56,6 +60,10 @@ async def close_connection() -> None:
 
 
 class SQLiteDB:
+    async def close(self) -> None:
+        """Close the shared SQLite connection (used on shutdown / between tests)."""
+        await close_connection()
+
     async def init_db(self) -> None:
         db = await _get_db()
         await db.execute(
@@ -285,14 +293,19 @@ class SQLiteDB:
             LIMIT 10
             """
         )).fetchall()
+        # Timestamps are stored as ISO-8601 with a "T" separator and a UTC
+        # offset; compare against a matching ISO cutoff rather than SQLite's
+        # space-separated datetime() output.
+        hourly_cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=24)).isoformat()
         hourly = await (await db.execute(
             """
             SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) AS hour, COUNT(*) AS count
             FROM events
-            WHERE timestamp >= datetime('now', '-24 hours')
+            WHERE timestamp >= ?
             GROUP BY hour
             ORDER BY hour
-            """
+            """,
+            (hourly_cutoff,),
         )).fetchall()
         top_paths = await (await db.execute(
             """
