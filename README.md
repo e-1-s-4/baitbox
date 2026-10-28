@@ -62,7 +62,7 @@ docker run -d \
   -p 2222:2222 \
   -p 2323:2323 \
   -p 8000:8000 \
-  ghcr.io/qylen/baitbox:latest
+  ghcr.io/e-1-s-4/baitbox:latest
 ```
 
 Open **http://localhost:8000** to see the dashboard.  
@@ -71,7 +71,7 @@ Login with **admin / admin** (change via env vars in production!).
 ### Docker Compose (PostgreSQL backend)
 
 ```bash
-git clone https://github.com/qylen/baitbox.git
+git clone https://github.com/e-1-s-4/baitbox.git
 cd baitbox
 docker compose up -d
 ```
@@ -81,7 +81,7 @@ This starts BaitBox with a PostgreSQL database for production workloads. See `do
 ### Python (local dev)
 
 ```bash
-git clone https://github.com/qylen/baitbox.git
+git clone https://github.com/e-1-s-4/baitbox.git
 cd baitbox
 pip install -r requirements.txt
 python -m baitbox.main
