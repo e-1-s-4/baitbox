@@ -4,9 +4,11 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from collections import deque
 from typing import Any, Dict, List
 
 logger = logging.getLogger("baitbox.sessions")
+
 
 class SSHSession:
     """An interactive honeypot session (SSH or Telnet).
@@ -35,18 +37,29 @@ class SSHSession:
         self.channel = channel
         self.transport = transport
         self.cwd = "/root"
-        self.commands: List[Dict[str, Any]] = []
+        self.last_exit_code = 0
+        # Bounded command history: attackers scripting loops over hours must
+        # not grow memory without bound. Newest entries are always kept.
+        from .config import settings
+        self.commands: deque[Dict[str, Any]] = deque(maxlen=settings.max_session_commands)
 
         # Initialize a custom virtual filesystem for this session
         from .vfs import VirtualFilesystem
         self.vfs = VirtualFilesystem()
 
-    def add_command(self, command: str) -> None:
+    def add_command(self, command: str, exit_code: int | None = None) -> None:
         self.last_seen = time.time()
-        self.commands.append({
+        entry: Dict[str, Any] = {
             "command": command,
             "timestamp": time.time(),
-        })
+        }
+        if exit_code is not None:
+            entry["exit_code"] = exit_code
+        self.commands.append(entry)
+
+    def command_count(self) -> int:
+        """Total commands executed this session (may exceed the stored window)."""
+        return getattr(self, "_total_commands", len(self.commands))
 
     def close(self) -> None:
         for obj in (self.channel, self.transport):
@@ -61,6 +74,28 @@ class SSHSession:
         """Check if session is stale (no activity for timeout_seconds)."""
         return (time.time() - self.last_seen) > timeout_seconds
 
+    def transcript(self) -> Dict[str, Any]:
+        """Return a structured transcript of the full stored session history."""
+        return {
+            "session_id": self.session_id,
+            "src_ip": self.src_ip,
+            "src_port": self.src_port,
+            "username": self.username,
+            "protocol": self.protocol,
+            "login_time": self.login_time,
+            "duration_seconds": round(time.time() - self.login_time, 2),
+            "command_count": len(self.commands),
+            "commands": [
+                {
+                    "index": i,
+                    "command": c.get("command", ""),
+                    "timestamp": c.get("timestamp"),
+                    "exit_code": c.get("exit_code"),
+                }
+                for i, c in enumerate(self.commands)
+            ],
+        }
+
 
 class SessionManager:
     def __init__(self) -> None:
@@ -70,6 +105,29 @@ class SessionManager:
 
     def register(self, session: SSHSession) -> None:
         with self._lock:
+            # Enforce a global concurrent-session cap: floods of short-lived
+            # connections must not exhaust memory. Evict the stalest session.
+            max_sessions = 1000
+            try:
+                from .config import settings
+                max_sessions = settings.max_sessions
+            except Exception:
+                pass
+            while len(self.sessions) >= max_sessions:
+                oldest_id = min(
+                    self.sessions,
+                    key=lambda sid: self.sessions[sid].last_seen,
+                    default=None,
+                )
+                if oldest_id is None:
+                    break
+                victim = self.sessions.pop(oldest_id, None)
+                if victim:
+                    victim.close()
+                    logger.warning(
+                        "Session cap (%s) reached — evicted stalest session %s from %s",
+                        max_sessions, oldest_id, victim.src_ip,
+                    )
             self.sessions[session.session_id] = session
             logger.debug(f"Registered session {session.session_id} from {session.src_ip}")
 
@@ -82,6 +140,11 @@ class SessionManager:
     def get_session(self, session_id: str) -> SSHSession | None:
         with self._lock:
             return self.sessions.get(session_id)
+
+    def count_for_ip(self, src_ip: str) -> int:
+        """Return the number of active sessions originating from an IP."""
+        with self._lock:
+            return sum(1 for s in self.sessions.values() if s.src_ip == src_ip)
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -99,7 +162,8 @@ class SessionManager:
                 "duration_seconds": round(time.time() - s.login_time, 2),
                 "idle_seconds": round(time.time() - s.last_seen, 2),
                 "cwd": s.cwd,
-                "commands": s.commands[-10:]  # last 10 commands
+                "command_count": len(s.commands),
+                "commands": list(s.commands)[-10:]  # last 10 commands
             })
         return res
 

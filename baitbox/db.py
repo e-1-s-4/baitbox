@@ -45,9 +45,12 @@ async def get_recent_events(
     protocol: Optional[str] = None,
     src_ip: Optional[str] = None,
     event_type: Optional[str] = None,
+    offset: int = 0,
 ) -> List[Dict[str, Any]]:
     """Retrieve the most recent logged events, optionally filtered."""
-    return await db_instance.get_recent_events(limit, protocol=protocol, src_ip=src_ip, event_type=event_type)
+    return await db_instance.get_recent_events(
+        limit, protocol=protocol, src_ip=src_ip, event_type=event_type, offset=offset
+    )
 
 
 async def get_stats() -> Dict[str, Any]:
@@ -76,3 +79,13 @@ async def load_blocked_ips() -> List[str]:
 async def get_user_password_hash(username: str) -> Optional[str]:
     """Retrieve the password hash for a dashboard user."""
     return await db_instance.get_user_password_hash(username)
+
+
+async def close_db() -> None:
+    """Release backend connections (used on graceful shutdown)."""
+    closer = getattr(db_instance, "close", None)
+    if callable(closer):
+        try:
+            await closer()
+        except Exception:
+            pass

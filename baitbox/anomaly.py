@@ -32,6 +32,10 @@ _IDLE_SECONDS = 3600.0
 _last_activity: Dict[str, float] = {}
 _events_since_prune = 0
 
+# Cap per-IP stored signature matches so repeated hits from a single
+# attacker cannot grow memory without bound.
+_MAX_INDICATORS_PER_IP = 20
+
 
 # ── MITRE ATT&CK Technique Definitions ──────────────────────────────────────
 
@@ -154,6 +158,14 @@ def prune_metrics(max_ips: int = _MAX_TRACKED_IPS, idle_seconds: float = _IDLE_S
             _ip_metrics.pop(ip, None)
             _last_activity.pop(ip, None)
     return len(stale)
+
+
+def _record_indicators(metrics: Dict[str, Any], hits: List[Dict[str, Any]]) -> None:
+    """Append signature matches to an IP's indicator list, bounded to the cap."""
+    stored = metrics["matched_indicators"]
+    stored.extend(hits)
+    if len(stored) > _MAX_INDICATORS_PER_IP:
+        del stored[: len(stored) - _MAX_INDICATORS_PER_IP]
 
 
 def reset_metrics(ip: str | None = None) -> None:
@@ -392,7 +404,7 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
             metrics["cryptominer_detected"] = True
             metrics["high_risk_detected"] = True
             metrics["mitre_techniques"].add("T1496")
-            metrics["matched_indicators"].extend(crypto_hits)
+            _record_indicators(metrics, crypto_hits)
             _attack_stats["cryptomining_probes"] += 1
 
         # Detect reverse shells
@@ -401,7 +413,7 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
             metrics["reverse_shell_detected"] = True
             metrics["high_risk_detected"] = True
             metrics["mitre_techniques"].add("T1059.004")
-            metrics["matched_indicators"].extend(rev_hits)
+            _record_indicators(metrics, rev_hits)
             _attack_stats["reverse_shells"] += 1
 
         # Add general MITRE tags
@@ -433,7 +445,7 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
             metrics["exploit_detected"] = True
             metrics["high_risk_detected"] = True
             metrics["mitre_techniques"].add("T1190")
-            metrics["matched_indicators"].extend(exploit_hits)
+            _record_indicators(metrics, exploit_hits)
             _attack_stats["web_exploits"] += 1
 
         for tag in get_mitre_attack_tags(full_req, "HTTP"):

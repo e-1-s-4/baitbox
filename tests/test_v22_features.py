@@ -65,6 +65,8 @@ class WebhookFilterTests(unittest.TestCase):
                 "event_type": "command", "threat_level": "CRITICAL",
                 "payload": {"command": "wget http://x"},
             })
+            from baitbox.webhooks import flush_webhooks
+            flush_webhooks(timeout=5)
         self.assertIn("body", self.captured)
 
     def test_discord_description_is_truncated(self):

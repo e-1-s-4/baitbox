@@ -51,6 +51,13 @@ services:
       BAITBOX_DASHBOARD_PASSWORD: changeme
       BAITBOX_JWT_SECRET: change-this-to-a-random-secret
 
+      # v2.3: enable when BaitBox sits behind a trusted reverse proxy only
+      BAITBOX_TRUST_PROXY: "0"
+      # v2.3: enable when the dashboard is served over HTTPS
+      BAITBOX_HSTS_ENABLED: "0"
+      # v2.3: Prometheus metrics (auth-protected /metrics endpoint)
+      BAITBOX_METRICS_ENABLED: "1"
+
       # Optional: webhook alerts
       # BAITBOX_WEBHOOK_URL: https://discord.com/api/webhooks/...
       # BAITBOX_WEBHOOK_TYPE: discord

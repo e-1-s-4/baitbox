@@ -73,7 +73,7 @@ class ApiV22Tests(unittest.TestCase):
         self.assertIn("threat_level", header_line)
 
     def test_app_version_bumped(self):
-        self.assertEqual(APP_VERSION, "2.2.0")
+        self.assertEqual(APP_VERSION, "2.3.0")
 
 
 if __name__ == "__main__":

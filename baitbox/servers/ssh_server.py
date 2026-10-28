@@ -183,6 +183,9 @@ _KNOWN_COMMANDS = frozenset({
     "false", "test", "[", "alias", "unalias", "export", "unset", "source",
     "set", "groups", "finger", "logname", "chattr", "lsattr", "getfacl",
     "setfacl", "visudo", "chsh", "chfn", "sh", "bash", "dash", "zsh",
+    # v2.3.0: DNS / recon / hardware enumeration
+    "dig", "nslookup", "host", "whois", "tree", "dmesg", "lsusb", "lspci",
+    "sha224sum", "sha384sum", "sha512sum",
 })
 
 
@@ -319,7 +322,7 @@ def _expand_vars(text: str, session: SSHSession) -> str:
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "UID": uid,
         "EUID": uid,
-        "?": "0",
+        "?": str(getattr(session, "last_exit_code", 0)),
         "$": "1177",
         "RANDOM": "1337",
     }
@@ -539,11 +542,21 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
                 return b"base64: invalid input\r\n"
         return b64.b64encode(stdin_data) + b"\r\n"
 
-    if executable in {"md5sum", "sha1sum", "sha256sum"}:
+    if executable in {"md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum"}:
         import hashlib
-        algo = {"md5sum": hashlib.md5, "sha1sum": hashlib.sha1, "sha256sum": hashlib.sha256}[executable]
+        algo = {
+            "md5sum": hashlib.md5,
+            "sha1sum": hashlib.sha1,
+            "sha224sum": hashlib.sha224,
+            "sha256sum": hashlib.sha256,
+            "sha384sum": hashlib.sha384,
+            "sha512sum": hashlib.sha512,
+        }[executable]
         label = operands[0] if operands else "-"
-        return f"{algo(stdin_data).hexdigest()}  {label}\r\n".encode()
+        # Match real shell fidelity: `cat f | sha256sum` hashes the same bytes
+        # as `sha256sum f`, so normalize CRLF display output back to LF.
+        normalized = stdin_data.replace(b"\r\n", b"\n")
+        return f"{algo(normalized).hexdigest()}  {label}\r\n".encode()
 
     if executable == "xargs":
         return stdin_data
@@ -585,7 +598,13 @@ def execute_session_command(session: SSHSession, command: str) -> tuple[bytes, b
         chunk, should_close = _run_pipeline(session, segment)
         collected += chunk
         if should_close:
+            session.last_exit_code = _exit_status_for(chunk)
+            if session.commands:
+                session.commands[-1]["exit_code"] = session.last_exit_code
             return collected, True
+    session.last_exit_code = _exit_status_for(collected)
+    if session.commands:
+        session.commands[-1]["exit_code"] = session.last_exit_code
     return collected, False
 
 
@@ -668,6 +687,9 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         ).encode(), False
 
     if executable == "history":
+        if "-c" in args:
+            session.commands.clear()
+            return b"", False
         lines = [f"  {i}  {c['command']}" for i, c in enumerate(session.commands, 1)]
         return ("\r\n".join(lines) + "\r\n").encode(), False
 
@@ -1260,7 +1282,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
                 return b64.b64encode(content) + b"\r\n", False
         return b"", False
 
-    if executable in {"md5sum", "sha256sum"}:
+    if executable in {"md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum"}:
         import hashlib
         target = [a for a in args if not a.startswith("-")][-1] if any(not a.startswith("-") for a in args) else None
         if target:
@@ -1268,7 +1290,8 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             content = session.vfs.read_file(fpath)
             if content is None:
                 return f"{executable}: {target}: No such file or directory\r\n".encode(), False
-            h = hashlib.md5(content).hexdigest() if executable == "md5sum" else hashlib.sha256(content).hexdigest()
+            algo = executable.replace("sum", "")
+            h = hashlib.new(algo, content).hexdigest()
             return f"{h}  {target}\r\n".encode(), False
         return b"", False
 
@@ -1285,6 +1308,92 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
 
     if executable in {"nc", "netcat", "ncat", "socat"}:
         return b"Ncat: Connection refused.\r\n", False
+
+    # ── DNS / recon / hardware enumeration (v2.3.0) ─────────────────────────
+
+    if executable in {"dig", "nslookup", "host"}:
+        target = next((a for a in operands if not a.startswith("-")), None)
+        if not target:
+            return (
+                b"usage: dig [@server] [-b address] [-p port] [-c type] name [type]\r\n"
+            ), False
+        record_type = next((a.upper() for a in args if a.upper() in ("A", "AAAA", "MX", "TXT", "NS", "ANY")), "A")
+        if executable == "dig":
+            return (
+                f"; <<>> DiG 9.18.12-0ubuntu0.22.04.3 <<>> {target} {record_type}\r\n"
+                f";; global options: +cmd\r\n"
+                f";; Got answer:\r\n"
+                f";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1337\r\n"
+                f";; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1\r\n\r\n"
+                f";; QUESTION SECTION:\r\n"
+                f";{target}.\t\t\tIN\t{record_type}\r\n\r\n"
+                f";; ANSWER SECTION:\r\n"
+                f"{target}.\t\t300\tIN\t{record_type}\t10.0.0.7\r\n\r\n"
+                f";; Query time: 12 msec\r\n"
+                f";; SERVER: 10.0.0.1#53(10.0.0.1) (UDP)\r\n"
+                f";; WHEN: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}\r\n"
+                f";; MSG SIZE  rcvd: 56\r\n"
+            ).encode(), False
+        return (
+            f"Server:\t\t10.0.0.1\r\n"
+            f"Address:\t10.0.0.1#53\r\n\r\n"
+            f"Non-authoritative answer:\r\n"
+            f"Name:\t{target}\r\n"
+            f"Address: 10.0.0.7\r\n"
+        ).encode(), False
+
+    if executable == "whois":
+        target = next((a for a in operands if not a.startswith("-")), None)
+        if not target:
+            return b"whois: missing whois server hostname\r\n", False
+        return (
+            f"% Query: {target}\r\n"
+            f"% APNIC/RIPE-style (fake) record served by BaitBox\r\n\r\n"
+            f"Domain Name: {target}\r\n"
+            f"Registrar: Example Registrar, Inc.\r\n"
+            f"Creation Date: 2019-03-14T04:20:00Z\r\n"
+            f"Registry Expiry Date: 2027-03-14T04:20:00Z\r\n"
+            f"Name Server: NS1.{target}\r\n"
+            f"Name Server: NS2.{target}\r\n"
+            f"Status: clientTransferProhibited\r\n"
+        ).encode(), False
+
+    if executable == "tree":
+        root = operands[0] if operands else session.cwd
+        root_path = session.vfs._normalize_path(session.cwd, root)
+        if not session.vfs.exists(root_path):
+            return f"tree: {root}: No such file or directory\r\n".encode(), False
+        rendered = session.vfs.tree(root_path, max_depth=3)
+        return rendered.replace("\n", "\r\n").encode() + b"\r\n", False
+
+    if executable == "dmesg":
+        if "--help" in args:
+            return b"Usage: dmesg [-c] [-r] [-n LEVEL] [-s SIZE]\r\n", False
+        return (
+            b"[    0.000000] Linux version 5.15.0-94-generic (buildd@lcy02-amd64) (gcc 11.4.0) #104-Ubuntu SMP\r\n"
+            b"[    0.434201] ACPI: Early table checksum verification disabled\r\n"
+            b"[    0.512883] PCI: Using configuration type 1 for base access\r\n"
+            b"[    0.894212] e1000: eth0 NIC Link is Up 1000 Mbps Full Duplex\r\n"
+            b"[    1.203441] EXT4-fs (sda1): mounted filesystem with ordered data mode\r\n"
+            b"[    2.104558] systemd[1]: Detected virtualization kvm.\r\n"
+            b"[    2.309882] systemd[1]: Reached target Multi-User System.\r\n"
+            b"[   47.881201] sshd[987]: Accepted password for root from 203.0.113.24 port 51234 ssh2\r\n"
+        ), False
+
+    if executable == "lsusb":
+        return (
+            b"Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\r\n"
+            b"Bus 001 Device 002: ID 80ee:0021 VirtualBox USB Tablet\r\n"
+            b"Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub\r\n"
+        ), False
+
+    if executable == "lspci":
+        return (
+            b"00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC\r\n"
+            b"00:01.0 VGA compatible controller: VMware SVGA II Adapter\r\n"
+            b"00:03.0 Ethernet controller: Intel Corporation 82540EM Gigabit Ethernet Controller\r\n"
+            b"00:1f.2 SATA controller: Intel Corporation 82801IR/IO/IH SATA Controller\r\n"
+        ), False
 
     if executable == "service":
         if len(args) >= 2 and args[1] == "status":

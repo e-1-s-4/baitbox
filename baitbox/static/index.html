@@ -654,6 +654,211 @@
     .toast.error { border-color: rgba(255,77,77,0.5); color: var(--red); }
 
     /* ═══════════════════════════════════════════════════════════════════════
+       FEED FILTER CHIPS (v2.3)
+    ═══════════════════════════════════════════════════════════════════════ */
+    .filter-chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 1px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 600;
+    }
+    .chip:hover { border-color: var(--border-bright); color: var(--text-primary); }
+    .chip.active {
+      border-color: var(--red);
+      background: var(--red-d);
+      color: var(--red);
+    }
+    .chip.active.all   { border-color: var(--green); background: var(--green-d); color: var(--green); }
+    .chip.active.crit  { border-color: var(--red);   background: var(--red-d);   color: var(--red); }
+    .chip.active.med   { border-color: var(--amber); background: var(--amber-d); color: var(--amber); }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       MITRE ATT&CK PANEL (v2.3)
+    ═══════════════════════════════════════════════════════════════════════ */
+    .mitre-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 0;
+      border-bottom: 1px dashed rgba(30,80,160,0.15);
+    }
+    .mitre-row:last-child { border-bottom: none; }
+    .mitre-id {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--purple);
+      background: var(--purple-d);
+      border: 1px solid rgba(177,122,255,0.3);
+      padding: 2px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    .mitre-name {
+      font-size: 11px;
+      color: var(--text-secondary);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mitre-tactic {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .mitre-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--cyan);
+      white-space: nowrap;
+    }
+    .cat-badges {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .cat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 1px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      background: var(--bg-card-hover);
+    }
+    .cat-badge b { color: var(--red); font-size: 11px; }
+    .cat-badge.hit { border-color: rgba(255,77,77,0.4); }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       EXPORT DROPDOWN (v2.3)
+    ═══════════════════════════════════════════════════════════════════════ */
+    .export-wrap { position: relative; display: inline-block; }
+    .export-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      min-width: 160px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-bright);
+      border-radius: var(--radius-sm);
+      padding: 6px;
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+      z-index: 500;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    }
+    .export-menu.open { display: flex; }
+    .export-menu button {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-align: left;
+      padding: 8px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .export-menu button:hover { background: var(--bg-card-hover); color: var(--green); }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       TRANSCRIPT MODAL (v2.3)
+    ═══════════════════════════════════════════════════════════════════════ */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2,4,9,0.85);
+      backdrop-filter: blur(6px);
+      z-index: 9000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: min(860px, 100%);
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-bright);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .modal-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--green);
+    }
+    .modal-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    .modal-close:hover { color: var(--red); border-color: rgba(255,77,77,0.5); }
+    .modal-body {
+      padding: 14px 18px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .tx-row {
+      display: flex;
+      gap: 10px;
+      padding: 3px 0;
+      border-bottom: 1px dashed rgba(30,80,160,0.1);
+    }
+    .tx-idx { color: var(--text-muted); min-width: 34px; text-align: right; }
+    .tx-time { color: var(--cyan); min-width: 84px; }
+    .tx-cmd { color: var(--text-primary); flex: 1; word-break: break-all; }
+    .tx-code { min-width: 42px; text-align: right; }
+    .tx-code.ok { color: var(--green); }
+    .tx-code.err { color: var(--red); }
+
+    /* ═══════════════════════════════════════════════════════════════════════
        FOOTER
     ═══════════════════════════════════════════════════════════════════════ */
     footer {
@@ -698,7 +903,7 @@
       <span class="logo-icon">🪤</span>
       <div class="logo-text">
         <h1>BAITBOX</h1>
-        <p>CYBER COMMAND DECOY SYSTEM v2.2</p>
+        <p>CYBER COMMAND DECOY SYSTEM v2.3</p>
       </div>
     </div>
 
@@ -809,9 +1014,26 @@
               REAL-TIME ATTACK STREAM
             </div>
             <div style="display:flex;gap:8px">
-              <button class="btn btn-green" id="export-btn" onclick="exportEvents('csv')" title="Export events as CSV (E)">EXPORT</button>
+              <div class="export-wrap">
+                <button class="btn btn-green" id="export-btn" onclick="toggleExportMenu(event)" title="Export events (E)">EXPORT ▾</button>
+                <div class="export-menu" id="export-menu">
+                  <button onclick="exportEvents('csv')">⬇ CSV</button>
+                  <button onclick="exportEvents('json')">⬇ JSON</button>
+                  <button onclick="exportEvents('cef')">⬇ CEF (ArcSight)</button>
+                  <button onclick="exportEvents('ecs')">⬇ ECS (Elastic)</button>
+                  <button onclick="exportEvents('ioc')">⬇ IOC feed</button>
+                </div>
+              </div>
               <button class="btn" id="clear-feed-btn" onclick="clearFeed()" title="Clear feed (C)">CLEAR</button>
               <button class="btn" id="pause-btn" onclick="togglePause()" title="Pause/resume feed (P)">PAUSE</button>
+            </div>
+          </div>
+          <div style="padding:10px 14px 0">
+            <div class="filter-chips" id="feed-filters">
+              <button class="chip active all" data-filter="ALL" onclick="setFeedFilter('ALL', this)">ALL</button>
+              <button class="chip" data-filter="CRITICAL" onclick="setFeedFilter('CRITICAL', this)">🔴 CRITICAL</button>
+              <button class="chip" data-filter="MEDIUM" onclick="setFeedFilter('MEDIUM', this)">🟡 MEDIUM</button>
+              <button class="chip" data-filter="LOW" onclick="setFeedFilter('LOW', this)">🟢 LOW</button>
             </div>
           </div>
           <div class="terminal" id="feed"></div>
@@ -848,6 +1070,23 @@
           </div>
         </div>
 
+        <!-- MITRE ATT&CK Techniques (v2.3) -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span class="indicator" style="background:var(--purple);animation:blink 2s infinite"></span>
+              MITRE ATT&amp;CK TECHNIQUES
+            </div>
+            <span style="font-family:var(--font-mono);font-size:9px;color:var(--text-muted)">LIVE MAPPING</span>
+          </div>
+          <div class="panel-body">
+            <div class="cat-badges" id="attack-cats"></div>
+            <div id="mitre-list">
+              <p style="color:var(--text-muted);font-size:11px;font-family:var(--font-mono)">No techniques observed yet</p>
+            </div>
+          </div>
+        </div>
+
         <!-- Top Passwords -->
         <div class="panel">
           <div class="panel-header">
@@ -873,9 +1112,20 @@
     </div><!-- /main-grid -->
   </main>
 
-  <footer>BaitBox Honeypot System v2.2 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/qylen/baitbox" style="color:var(--green);text-decoration:none">GitHub</a></footer>
+  <footer>BaitBox Honeypot System v2.3 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/qylen/baitbox" style="color:var(--green);text-decoration:none">GitHub</a></footer>
 
 </div><!-- /layout -->
+
+<!-- Transcript Modal (v2.3) -->
+<div class="modal-backdrop" id="tx-backdrop" onclick="if(event.target===this)closeTranscript()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="tx-title">📜 SESSION TRANSCRIPT</span>
+      <button class="modal-close" onclick="closeTranscript()">CLOSE ✕</button>
+    </div>
+    <div class="modal-body" id="tx-body"></div>
+  </div>
+</div>
 
 <!-- Toast -->
 <div class="toast" id="toast">⚡ <span id="toast-msg"></span></div>
@@ -909,6 +1159,7 @@ let timelineChart = null;
 let protoChart = null;
 let geoCache = {};     // ip -> {lat,lon,city,country,countryCode,threat_score}
 let serverTotalEvents = null;  // authoritative total from /api/stats
+let feedFilter = 'ALL';        // v2.3: live-feed threat-level filter
 const MAX_EVENTS = 300;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -919,8 +1170,19 @@ document.addEventListener('DOMContentLoaded', () => {
   initCharts();
   loadInitialData();
   connectWS();
+  fetchAttackSummary();
   setInterval(() => fetchSessions(), 4000);
   setInterval(() => fetchStats(), 30000);
+  setInterval(() => fetchAttackSummary(), 10000);
+  document.addEventListener('click', (e) => {
+    const menu = document.getElementById('export-menu');
+    if (menu && menu.classList.contains('open') && !e.target.closest('.export-wrap')) {
+      menu.classList.remove('open');
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeTranscript();
+  });
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1197,7 +1459,7 @@ function setWSStatus(online) {
 function renderFeed() {
   const feed = document.getElementById('feed');
   feed.innerHTML = '';
-  const recent = events.slice(-100).reverse();
+  const recent = events.slice(-100).reverse().filter(eventMatchesFilter);
   if (!recent.length) {
     feed.innerHTML = `<div class="empty-state"><span class="empty-icon">🎣</span><span class="empty-text">Awaiting decoy triggers. Bait is set.</span></div>`;
     return;
@@ -1206,6 +1468,7 @@ function renderFeed() {
 }
 
 function appendEventRow(ev) {
+  if (!eventMatchesFilter(ev)) return;   // v2.3: respect active threat filter
   const feed = document.getElementById('feed');
   // Remove empty state if present
   const empty = feed.querySelector('.empty-state');
@@ -1275,16 +1538,125 @@ function togglePause() {
   document.getElementById('pause-btn').textContent = paused ? 'RESUME' : 'PAUSE';
 }
 
+/* ── v2.3: feed threat-level filtering ─────────────────────────────────── */
+function setFeedFilter(level, chipEl) {
+  feedFilter = level;
+  document.querySelectorAll('#feed-filters .chip').forEach(c => c.classList.remove('active', 'all', 'crit', 'med'));
+  chipEl.classList.add('active');
+  if (level === 'ALL') chipEl.classList.add('all');
+  if (level === 'CRITICAL') chipEl.classList.add('crit');
+  if (level === 'MEDIUM') chipEl.classList.add('med');
+  renderFeed();
+}
+
+function eventMatchesFilter(ev) {
+  if (feedFilter === 'ALL') return true;
+  const level = ev.threat_level || 'LOW';
+  return level === feedFilter;
+}
+
+function toggleExportMenu(event) {
+  event.stopPropagation();
+  document.getElementById('export-menu').classList.toggle('open');
+}
+
 function exportEvents(format = 'csv') {
+  document.getElementById('export-menu').classList.remove('open');
+  if (format === 'ioc') {
+    const url = `/api/ioc?format=${encodeURIComponent(format)}&limit=1000`;
+    window.open(url, '_blank');
+    showToast('📥 Exporting IOC threat feed…');
+    return;
+  }
   const url = `/api/events/export?format=${encodeURIComponent(format)}&limit=1000`;
   window.open(url, '_blank');
   showToast(`📥 Exporting events as ${format.toUpperCase()}…`);
 }
 
+/* ── v2.3: MITRE ATT&CK live panel ────────────────────────────────────── */
+async function fetchAttackSummary() {
+  try {
+    const res = await fetch('/api/attack-summary');
+    const data = await res.json();
+    renderAttackSummary(data);
+  } catch (e) {}
+}
+
+function renderAttackSummary(summary) {
+  const listEl = document.getElementById('mitre-list');
+  const catsEl = document.getElementById('attack-cats');
+  if (!listEl || !catsEl) return;
+
+  const stats = (summary && summary.stats) || {};
+  const cats = [
+    ['🌐 Web exploits', stats.web_exploits || 0],
+    ['⛏️ Cryptomining', stats.cryptomining_probes || 0],
+    ['🐚 Reverse shells', stats.reverse_shells || 0],
+    ['⬆️ Priv-esc', stats.privilege_escalations || 0],
+    ['🔑 Credential access', stats.credential_access || 0],
+  ];
+  catsEl.innerHTML = cats.map(([label, count]) =>
+    `<span class="cat-badge ${count > 0 ? 'hit' : ''}">${label} <b>${count}</b></span>`
+  ).join('');
+
+  const techniques = (summary && summary.top_mitre_techniques) || [];
+  if (!techniques.length) {
+    listEl.innerHTML = `<p style="color:var(--text-muted);font-size:11px;font-family:var(--font-mono)">No techniques observed yet</p>`;
+    return;
+  }
+  listEl.innerHTML = techniques.slice(0, 8).map(t => `
+    <div class="mitre-row">
+      <span class="mitre-id">${escHtml(t.technique_id)}</span>
+      <span class="mitre-name" title="${escHtml(t.name || '')}">${escHtml(t.name || 'Unknown')}</span>
+      <span class="mitre-tactic">${escHtml((t.tactic || '').split(',')[0])}</span>
+      <span class="mitre-count">${t.count} IP${t.count === 1 ? '' : 's'}</span>
+    </div>
+  `).join('');
+}
+
+/* ── v2.3: session transcript modal ───────────────────────────────────── */
+async function showTranscript(sessionId) {
+  const backdrop = document.getElementById('tx-backdrop');
+  const body = document.getElementById('tx-body');
+  const title = document.getElementById('tx-title');
+  body.innerHTML = '<p style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px">Loading transcript…</p>';
+  backdrop.classList.add('open');
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+    const data = await res.json();
+    if (data.status === 'error') {
+      body.innerHTML = `<p style="color:var(--red)">${escHtml(data.message || 'Session not found')}</p>`;
+      return;
+    }
+    title.textContent = `📜 ${data.protocol || 'SSH'} SESSION · ${data.src_ip} · user ${data.username} · ${data.command_count} cmds`;
+    const cmds = data.commands || [];
+    if (!cmds.length) {
+      body.innerHTML = '<p style="color:var(--text-muted)">No commands recorded yet.</p>';
+      return;
+    }
+    body.innerHTML = cmds.map(c => {
+      const code = (c.exit_code === null || c.exit_code === undefined) ? '—' : c.exit_code;
+      const cls = code === '—' ? '' : (code === 0 ? 'ok' : 'err');
+      return `<div class="tx-row">
+        <span class="tx-idx">${c.index}</span>
+        <span class="tx-time">${formatTime(c.timestamp)}</span>
+        <span class="tx-cmd">${escHtml(c.command)}</span>
+        <span class="tx-code ${cls}">${code}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    body.innerHTML = '<p style="color:var(--red)">Failed to load transcript.</p>';
+  }
+}
+
+function closeTranscript() {
+  document.getElementById('tx-backdrop').classList.remove('open');
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
   if (e.key === 'p' || e.key === 'P') togglePause();
-  if (e.key === 'e' || e.key === 'E') exportEvents('csv');
+  if (e.key === 'e' || e.key === 'E') toggleExportMenu(e);
   if (e.key === 'c' || e.key === 'C') clearFeed();
 });
 
@@ -1332,6 +1704,7 @@ function renderSessions() {
       <div class="session-actions">
         <button class="btn btn-red" id="kill-${s.session_id}" onclick="killSession('${s.session_id}','${s.src_ip}')">BOOT INTRUDER</button>
         <button class="btn btn-amber" onclick="blockAndKill('${s.src_ip}')">BLOCK IP</button>
+        <button class="btn" onclick="showTranscript('${s.session_id}')">📜 TRANSCRIPT</button>
         <button class="btn" onclick="centerMapOnIP('${s.src_ip}')">📍 MAP</button>
       </div>
     `;

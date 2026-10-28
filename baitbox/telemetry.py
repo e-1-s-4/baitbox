@@ -8,6 +8,8 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from . import __version__
+
 logger = logging.getLogger("baitbox.telemetry")
 
 
@@ -102,7 +104,7 @@ def export_cef_event(event: Dict[str, Any]) -> str:
     version = "0"
     vendor = "BaitBox"
     product = "Honeypot"
-    dev_version = "2.2.0"
+    dev_version = __version__
     event_type = event.get("event_type", "activity")
     name = f"{event.get('protocol', 'UNKNOWN')} {event_type.replace('_', ' ').title()}"
 
@@ -179,7 +181,7 @@ def export_ecs_event(event: Dict[str, Any]) -> Dict[str, Any]:
             "vendor": "BaitBox",
             "product": "Honeypot",
             "type": "honeypot",
-            "version": "2.2.0",
+            "version": __version__,
         },
         "source": {
             "ip": src_ip,

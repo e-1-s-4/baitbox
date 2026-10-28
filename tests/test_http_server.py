@@ -5,6 +5,17 @@ from baitbox.ratelimit import block_ip, unblock_ip
 from baitbox.servers.http_server import honeypot
 
 
+def _trusted_proxy_settings(**kwargs):
+    """Settings stub matching the legacy test expectation: honour X-Forwarded-For."""
+    from baitbox.config import settings as real
+    defaults = {
+        "trust_proxy": True,
+        "http_max_body_bytes": real.http_max_body_bytes,
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
 class FakeRequest:
     method = "GET"
     headers = {"x-forwarded-for": "203.0.113.42"}
@@ -15,7 +26,10 @@ class FakeRequest:
         return b""
 
 
-def test_blocked_ip_is_rejected_before_honeypot_response():
+def test_blocked_ip_is_rejected_before_honeypot_response(monkeypatch):
+    from baitbox.servers import http_server
+
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings())
     ip = "203.0.113.42"
     block_ip(ip)
     try:
@@ -27,9 +41,27 @@ def test_blocked_ip_is_rejected_before_honeypot_response():
     assert response.body == b'{"status":"blocked"}'
 
 
+def test_blocked_ip_still_caught_without_proxy_headers(monkeypatch):
+    """v2.3: without BAITBOX_TRUST_PROXY the socket peer IP is authoritative,
+    so a spoofed X-Forwarded-For cannot evade an IP block."""
+    from baitbox.servers import http_server
+
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings(trust_proxy=False))
+    # Attacker spoofs a clean IP in XFF, but their real IP is blocked
+    ip = "198.51.100.99"
+    block_ip(ip)
+    try:
+        response = asyncio.run(honeypot(FakeRequest(), "wp-admin"))
+    finally:
+        unblock_ip(ip)
+
+    assert response.status_code == 403
+
+
 def test_rate_limited_ip_is_rejected_before_honeypot_response(monkeypatch):
     from baitbox.servers import http_server
 
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings())
     monkeypatch.setattr(http_server, "is_rate_limited", lambda src_ip, protocol: True)
     response = asyncio.run(honeypot(FakeRequest(), "wp-admin"))
     assert response.status_code == 429
@@ -77,13 +109,28 @@ def test_ip_validation_normalizes_ipv4_and_rejects_bad_values():
         raise AssertionError("invalid IP was accepted")
 
 
-def test_client_ip_ignores_malformed_forwarded_for_header():
-    from baitbox.servers.http_server import _client_ip
+def test_client_ip_ignores_malformed_forwarded_for_header(monkeypatch):
+    from baitbox.servers import http_server
 
     class BadForwardedRequest(FakeRequest):
         headers = {"x-forwarded-for": "not-an-ip, 203.0.113.10"}
 
-    assert _client_ip(BadForwardedRequest()) == "198.51.100.99"
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings())
+    assert http_server._client_ip(BadForwardedRequest()) == "198.51.100.99"
+
+
+def test_client_ip_ignores_forwarded_for_when_proxy_untrusted(monkeypatch):
+    """v2.3: XFF is untrusted by default so attackers cannot rotate identity."""
+    from baitbox.servers import http_server
+
+    class SpoofedRequest(FakeRequest):
+        headers = {"x-forwarded-for": "203.0.113.10"}
+
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings(trust_proxy=False))
+    assert http_server._client_ip(SpoofedRequest()) == "198.51.100.99"
+
+    monkeypatch.setattr(http_server, "settings", _trusted_proxy_settings(trust_proxy=True))
+    assert http_server._client_ip(SpoofedRequest()) == "203.0.113.10"
 
 
 def test_auth_route_matching_leaves_api_scanner_decoys_public():

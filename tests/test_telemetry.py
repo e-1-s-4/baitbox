@@ -75,7 +75,7 @@ class TelemetryTests(unittest.TestCase):
             "mitre_techniques": ["T1059.004", "T1105"],
         }
         cef = export_cef_event(event)
-        self.assertTrue(cef.startswith("CEF:0|BaitBox|Honeypot|2.2.0|command|SSH Command|8|"))
+        self.assertTrue(cef.startswith("CEF:0|BaitBox|Honeypot|2.3.0|command|SSH Command|8|"))
         self.assertIn("src=203.0.113.5", cef)
         self.assertIn("proto=SSH", cef)
         self.assertIn("cn1=80", cef)

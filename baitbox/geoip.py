@@ -18,12 +18,30 @@ logger = logging.getLogger("baitbox.geoip")
 _CACHE: dict[str, dict[str, Any]] = {}
 _TTL = 3600  # 1 hour
 
+# Bound the cache so scanners rotating across huge IP ranges cannot grow
+# memory without limit. Expired entries are evicted first, then oldest.
+_CACHE_MAX_ENTRIES = 4096
+
 # Known Tor exit node ranges / suspicious ASN keywords (heuristic)
 _SUSPICIOUS_ASN_KEYWORDS = {
     "digitalocean", "linode", "vultr", "ovh", "hetzner", "leaseweb",
     "serverius", "choopa", "frantech", "aeza", "m247", "zenlayer",
     "serverstack", "datacamp", "host europe", "datawagon", "combahton",
 }
+
+
+def _cache_put(ip: str, data: dict[str, Any], expires: float) -> None:
+    """Store a cache entry, evicting expired/oldest entries when over capacity."""
+    if len(_CACHE) >= _CACHE_MAX_ENTRIES and ip not in _CACHE:
+        now = time.time()
+        expired = [k for k, v in _CACHE.items() if v["expires"] <= now]
+        for k in expired:
+            del _CACHE[k]
+        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+            oldest = sorted(_CACHE.items(), key=lambda kv: kv[1]["expires"])[: len(_CACHE) // 4]
+            for k, _ in oldest:
+                del _CACHE[k]
+    _CACHE[ip] = {"data": data, "expires": expires}
 
 
 def _is_private(ip: str) -> bool:
@@ -80,7 +98,7 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
         from .db import get_geoip_cache
         cached_data = await get_geoip_cache(ip)
         if cached_data:
-            _CACHE[ip] = {"data": cached_data, "expires": now + _TTL}
+            _cache_put(ip, cached_data, now + _TTL)
             return cached_data
     except Exception as exc:
         logger.debug("GeoIP SQLite cache read failed for %s: %s", ip, exc)
@@ -92,7 +110,7 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
     except Exception as exc:
         logger.debug("GeoIP lookup failed for %s: %s", ip, exc)
 
-    _CACHE[ip] = {"data": data, "expires": now + _TTL}
+    _cache_put(ip, data, now + _TTL)
     try:
         from .db import set_geoip_cache
         await set_geoip_cache(ip, data, ttl=_TTL)

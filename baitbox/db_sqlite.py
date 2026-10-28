@@ -219,6 +219,7 @@ class SQLiteDB:
         protocol: Optional[str] = None,
         src_ip: Optional[str] = None,
         event_type: Optional[str] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         clauses = []
         params: list[Any] = []
@@ -233,10 +234,11 @@ class SQLiteDB:
             params.append(event_type)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
+        params.append(max(0, offset))
 
         db = await _get_db()
         cursor = await db.execute(
-            f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?",
+            f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ? OFFSET ?",
             params,
         )
         rows = await cursor.fetchall()

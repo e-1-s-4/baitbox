@@ -18,7 +18,8 @@ from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDiscon
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..db import get_recent_events, get_stats, log_event, persist_blocked_ip, persist_unblocked_ip
+from ..db import close_db, get_recent_events, get_stats, log_event, persist_blocked_ip, persist_unblocked_ip
+from .. import __version__
 from ..pubsub import pubsub
 from ..ratelimit import (
     block_ip,
@@ -42,27 +43,60 @@ STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 LOGIN_HTML = STATIC_DIR / "login.html"
 
-APP_VERSION = "2.2.0"
+APP_VERSION = __version__
 
 
 def create_jwt_token(username: str, expires_delta: dt.timedelta | None = None) -> str:
     """Create a signed dashboard session token for a username."""
     if expires_delta is None:
         expires_delta = dt.timedelta(hours=settings.jwt_expiry_hours)
+    now = dt.datetime.now(dt.UTC)
     payload = {
         "sub": username,
-        "exp": dt.datetime.now(dt.UTC) + expires_delta,
+        "iat": now,
+        "jti": secrets.token_hex(16),  # unique id → enables logout revocation
+        "exp": now + expires_delta,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def verify_jwt_token(token: str) -> str | None:
-    """Return the authenticated username for a valid token, otherwise ``None``."""
+# Revoked token ids (jti → expiry). Logout adds entries here so a stolen or
+# leftover JWT immediately loses access without waiting for natural expiry.
+_revoked_jtis: dict[str, float] = {}
+_revocation_lock = threading.Lock()
+
+
+def _revoke_token(token: str) -> None:
+    """Add a token's jti to the revocation list until its natural expiry."""
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-        return payload.get("sub")
+    except jwt.PyJWTError:
+        return
+    jti = payload.get("jti")
+    exp = payload.get("exp", 0)
+    if not jti:
+        return
+    with _revocation_lock:
+        _revoked_jtis[jti] = float(exp)
+        # Opportunistic cleanup of already-expired entries
+        now = time.time()
+        expired = [j for j, e in _revoked_jtis.items() if e <= now]
+        for j in expired:
+            del _revoked_jtis[j]
+
+
+def verify_jwt_token(token: str) -> str | None:
+    """Return the authenticated username for a valid, non-revoked token."""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError:
         return None
+    jti = payload.get("jti")
+    if jti:
+        with _revocation_lock:
+            if jti in _revoked_jtis:
+                return None
+    return payload.get("sub")
 
 
 # Pre-computed hash of a random secret so unknown usernames cost the same
@@ -218,6 +252,8 @@ class SecurityHeadersMiddleware:
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"geolocation=(), microphone=(), camera=()"),
                 ]
+                if settings.hsts_enabled:
+                    extra.append((b"strict-transport-security", f"max-age={settings.hsts_max_age}; includeSubDomains".encode()))
                 existing = {k.lower() for k, _ in headers}
                 for key, value in extra:
                     if key not in existing:
@@ -252,6 +288,8 @@ _DASHBOARD_API_EXACT_PATHS = {
     "/api/stats",
     "/api/sessions",
     "/api/attack-summary",
+    "/api/ioc",
+    "/metrics",
 }
 
 _DASHBOARD_API_PREFIXES = (
@@ -424,7 +462,7 @@ _DECOY_PATHS = {
 _DECOY_PREFIXES = (
     "/.git/", "/.svn/", "/.aws/", "/vendor/phpunit/", "/boaform/",
     "/.docker/", "/.kube/", "/.config/", "/ssh/", "/api/",
-    "/admin/", "/wp-content/", "/wp-includes/", "/node_modules/",
+    "/admin/", "/wp-content/", "/wp-includes/", "/wp-json/", "/node_modules/",
     "/vendor/", "/src/", "/lib/", "/include/", "/classes/",
 )
 _DECOY_SUFFIXES = (
@@ -452,16 +490,80 @@ DB_USERNAME=app_user
 DB_PASSWORD=REDACTED_BY_BAITBOX
 """
 
+# Fake robots.txt — deliberately advertises "hidden" juicy paths. Scanners
+# treat Disallow entries as a target list, which is exactly the point.
+_FAKE_ROBOTS = """User-agent: *
+Disallow: /admin
+Disallow: /administrator
+Disallow: /phpmyadmin
+Disallow: /backup.sql
+Disallow: /config
+Disallow: /.env
+Disallow: /.git
+Disallow: /wp-admin
+Disallow: /panel
+
+User-agent: Googlebot
+Disallow: /admin
+Disallow: /backup.sql
+"""
+
+# Fake phpinfo() page (trimmed) — rewards recon and fingerprints a vulnerable
+# PHP stack worth probing further.
+_FAKE_PHPINFO = """<!doctype html><html><head><title>phpinfo()</title></head><body>
+<h1>PHP Version 8.1.2-1ubuntu2.14</h1>
+<table>
+<tr><td class="e">System </td><td>Linux {hostname} 5.15.0-94-generic #104-Ubuntu SMP x86_64 </td></tr>
+<tr><td class="e">Server API </td><td>FPM/FastCGI </td></tr>
+<tr><td class="e">document_root </td><td><i>/var/www/html</i> </td></tr>
+<tr><td class="e">SMTP </td><td><i>localhost</i> </td></tr>
+<tr><td class="e">mysql.default_socket </td><td><i>/var/run/mysqld/mysqld.sock</i> </td></tr>
+<tr><td class="e">MYSQL_INCLUDE </td><td><i>-I/usr/include/mysql</i> </td></tr>
+<tr><td class="e">allow_url_include </td><td><b>Off</b> </td></tr>
+<tr><td class="e">display_errors </td><td><b>Off</b> </td></tr>
+</table>
+<h2>PHP Credits</h2>
+</body></html>
+"""
+
+def _fake_wp_users() -> list[dict[str, Any]]:
+    """Classic WordPress user-enumeration response (GET /wp-json/wp/v2/users)."""
+    return [
+        {
+            "id": 1,
+            "name": "admin",
+            "url": "https://production.example.com",
+            "description": "Site Administrator",
+            "slug": "admin",
+            "avatar_urls": {"24": "/avatar/admin.png", "96": "/avatar/admin.png"},
+        },
+        {
+            "id": 2,
+            "name": "deploy",
+            "url": "",
+            "description": "CI deployment account",
+            "slug": "deploy",
+            "avatar_urls": {"24": "/avatar/deploy.png", "96": "/avatar/deploy.png"},
+        },
+    ]
+
 
 def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        # Only trust the left-most value; proxies append subsequent hops.
-        candidate = forwarded_for.split(",", 1)[0].strip()
-        try:
-            return str(ip_address(candidate))
-        except ValueError:
-            pass
+    """Derive the attacker's source IP.
+
+    X-Forwarded-For is honoured only when ``BAITBOX_TRUST_PROXY`` is enabled —
+    otherwise a direct attacker could rotate the header to rotate identity and
+    evade blocks/rate-limits.
+    """
+    if settings.trust_proxy:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            # Only trust the left-most value; proxies append subsequent hops.
+            candidate = forwarded_for.split(",", 1)[0].strip()
+            try:
+                return str(ip_address(candidate))
+            except ValueError:
+                pass
     return request.client.host if request.client else "unknown"
 
 
@@ -589,7 +691,18 @@ async def login(request: Request, username: str = Form(...), password: str = For
 
 @app.get("/logout")
 @app.post("/logout")
-async def logout() -> Response:
+async def logout(request: Request) -> Response:
+    # Revoke the presented JWT immediately (defence against token theft)
+    token = request.query_params.get("token")
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
+        cookie = request.cookies.get("session_token")
+        token = cookie
+    if token:
+        _revoke_token(token)
     response = RedirectResponse(url="/login", status_code=307)
     response.delete_cookie(key="session_token")
     return response
@@ -604,6 +717,18 @@ async def dashboard() -> str:
 async def healthz() -> dict[str, Any]:
     """Lightweight liveness probe for containers and orchestrators."""
     return {"status": "ok", "service": "baitbox", "version": app.version}
+
+
+_FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+    "<text y='.9em' font-size='90'>\U0001FAA7</text></svg>"
+)
+
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    """Emoji favicon so browser noise doesn't hit the catch-all honeypot."""
+    return Response(_FAVICON_SVG, media_type="image/svg+xml")
 
 
 @app.get("/readyz")
@@ -629,12 +754,14 @@ async def readyz() -> Response:
 @app.get("/api/events")
 async def api_events(
     limit: int = 100,
+    offset: int = 0,
     protocol: str | None = None,
     src_ip: str | None = None,
     event_type: str | None = None,
 ) -> list[dict[str, Any]]:
     events = await get_recent_events(
         limit=_limit_value(limit),
+        offset=max(0, min(int(offset) if str(offset).isdigit() else 0, 100000)),
         protocol=protocol or None,
         src_ip=src_ip or None,
         event_type=event_type or None,
@@ -692,6 +819,60 @@ async def api_attack_summary() -> dict[str, Any]:
     return get_attack_summary()
 
 
+@app.get("/metrics")
+async def api_metrics() -> Response:
+    """Prometheus scrape endpoint (text exposition format, auth-protected)."""
+    if not settings.metrics_enabled:
+        return JSONResponse({"detail": "Metrics disabled"}, status_code=404)
+    from ..metrics import build_prometheus_metrics
+    try:
+        stats = await get_stats()
+    except Exception:
+        # DB trouble must not break metric scraping — in-memory gauges still work
+        stats = {"total_events": 0, "by_protocol": [], "by_event_type": []}
+    payload = build_prometheus_metrics(
+        stats,
+        blocked_count=len(get_blocked_ips()),
+        session_count=len(_session_snapshot()),
+    )
+    return Response(
+        payload,
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _session_snapshot() -> list[dict[str, Any]]:
+    from ..sessions import session_manager
+    return session_manager.list_sessions()
+
+
+@app.get("/api/ioc")
+async def api_ioc(format: str = "json", limit: int = 1000) -> Response:
+    """Indicator-of-Compromise feed: malicious IPs, credentials, probed paths.
+
+    Formats: ``json`` (full feed), ``csv`` (flat table), ``txt`` (one IP per
+    line, ready for ipset / nginx deny / CrowdSec blocklists).
+    """
+    from ..ioc import build_ioc_feed, ioc_feed_to_csv, ioc_feed_to_ip_list
+    events = await get_recent_events(limit=_limit_value(limit, maximum=5000))
+    feed = build_ioc_feed([_enrich_event(dict(ev)) for ev in events], blocked_ips=get_blocked_ips())
+    fmt = format.lower()
+    if fmt == "csv":
+        return Response(
+            ioc_feed_to_csv(feed),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=baitbox-ioc.csv"},
+        )
+    if fmt == "txt":
+        return Response(
+            ioc_feed_to_ip_list(feed),
+            media_type="text/plain",
+            headers={"Content-Disposition": "attachment; filename=baitbox-ioc.txt"},
+        )
+    return JSONResponse(feed)
+
+
 @app.get("/api/stats")
 async def api_stats() -> dict[str, Any]:
     stats = await get_stats()
@@ -706,6 +887,16 @@ async def api_sessions() -> list[dict[str, Any]]:
     from ..sessions import session_manager
     sessions = session_manager.list_sessions()
     return [_enrich_event(s) for s in sessions]
+
+
+@app.get("/api/sessions/{session_id}/transcript")
+async def api_session_transcript(session_id: str) -> dict[str, Any]:
+    """Full command transcript for one honeypot session (forensic review)."""
+    from ..sessions import session_manager
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return JSONResponse({"status": "error", "message": "Session not found."}, status_code=404)
+    return session.transcript()
 
 
 
@@ -816,8 +1007,25 @@ async def honeypot(request: Request, path: str) -> Response:
     if request.method == "HEAD":
         return Response(status_code=200)
 
+    path = request.url.path
+
+    # robots.txt decoy — advertises "hidden" paths to guide scanners into traps
+    if path == "/robots.txt":
+        return Response(_FAKE_ROBOTS, media_type="text/plain", status_code=200)
+
+    # WordPress REST user enumeration decoy
+    if path == "/wp-json/wp/v2/users" or path == "/wp-json/wp/v2/users/":
+        return JSONResponse(_fake_wp_users(), status_code=200)
+
+    # phpinfo decoy
+    if path in ("/phpinfo.php", "/info.php"):
+        return HTMLResponse(
+            _FAKE_PHPINFO.format(hostname=settings.ssh_banner_hostname),
+            status_code=200,
+        )
+
     # .env file decoy - return fake env to entice credential harvesting bots
-    if request.url.path in ("/.env", "/env", "/.env.local", "/.env.production", "/.env.development", "/.env.staging"):
+    if path in ("/.env", "/env", "/.env.local", "/.env.production", "/.env.development", "/.env.staging"):
         return Response(_FAKE_ENV, media_type="text/plain", status_code=200)
 
     # .aws/credentials decoy
@@ -832,13 +1040,18 @@ async def honeypot(request: Request, path: str) -> Response:
         return JSONResponse({"auths": {"https://index.docker.io/v1/": {"auth": "YWRtaW46cHJvZF9kb2NrZXJfcGFzc185OTg4"}}}, status_code=200)
 
     # .git/config decoy
-    if "/.git" in request.url.path:
+    if "/.git" in path:
+        if path.endswith("HEAD"):
+            return Response(
+                "ref: refs/heads/main\n",
+                media_type="text/plain", status_code=200,
+            )
         return Response(
             "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/example/production.git\n",
             media_type="text/plain", status_code=200,
         )
 
-    if request.url.path in _DECOY_PATHS or _is_probe_path(request.url.path):
+    if path in _DECOY_PATHS or _is_probe_path(path):
         is_post = request.method == "POST"
         return HTMLResponse(
             """

@@ -84,13 +84,46 @@ def test_discord_webhook_telnet_auth_format(monkeypatch):
     assert "Telnet Login Attempt" in captured["body"]["embeds"][0]["description"]
 
 
-def test_send_webhook_runs_in_background_thread(monkeypatch):
+def test_send_webhook_enqueues_async_delivery(monkeypatch):
+    """v2.3.0: notifications go through the bounded queue and are delivered
+    asynchronously by the singleton worker thread."""
+    delivered: list[dict] = []
+
+    class FakeResponse:
+        def read(self):
+            return b"ok"
+
+    def fake_urlopen(req, timeout=5):
+        delivered.append(json.loads(req.data.decode()))
+        return FakeResponse()
+
     monkeypatch.setattr(
         "baitbox.webhooks.settings",
         _webhook_settings(webhook_url="https://discord.example/hook"),
     )
-    thread = MagicMock()
-    with patch("baitbox.webhooks.threading.Thread", return_value=thread) as thread_cls:
-        send_webhook_notification({"src_ip": "1.2.3.4", "protocol": "HTTP", "event_type": "request", "payload": {}})
-        thread_cls.assert_called_once()
-        thread.start.assert_called_once()
+    monkeypatch.setattr("baitbox.webhooks.urllib.request.urlopen", fake_urlopen)
+
+    send_webhook_notification({"src_ip": "1.2.3.4", "protocol": "HTTP", "event_type": "request", "payload": {}})
+    from baitbox.webhooks import flush_webhooks
+    assert flush_webhooks(timeout=5)
+    assert len(delivered) == 1
+
+
+def test_webhook_queue_drops_on_overflow(monkeypatch):
+    """When the bounded queue is full, events are dropped — not threads spawned."""
+    import baitbox.webhooks as wh
+
+    monkeypatch.setattr(
+        "baitbox.webhooks.settings",
+        _webhook_settings(webhook_url="https://discord.example/hook"),
+    )
+    # Keep the consumer out of the picture so the queue fills deterministically
+    monkeypatch.setattr(wh, "_ensure_worker", lambda: None)
+    limit = wh._delivery_queue.maxsize
+    for i in range(limit + 25):
+        wh.send_webhook_notification({"src_ip": "1.2.3.4", "protocol": "HTTP", "event_type": "request", "payload": {}})
+    # Queue never exceeds its bound and the rest were dropped
+    assert wh._delivery_queue.qsize() == limit
+    while not wh._delivery_queue.empty():
+        wh._delivery_queue.get_nowait()
+        wh._delivery_queue.task_done()

@@ -122,6 +122,14 @@ class _TransportStub:
             pass
 
 
+# Per-batch line-processing cap: floods of pipelined input must not spawn
+# unbounded asyncio tasks on a single connection.
+_MAX_LINES_PER_BATCH = 64
+# Hard input-buffer ceiling — a telnet peer pushing more than this without
+# newline framing is abusing the protocol; drop them.
+_MAX_BUFFER_BYTES = 262144
+
+
 class TelnetHoneypot(asyncio.Protocol):
     """Asyncio protocol implementing a fake Telnet server with a VFS shell."""
 
@@ -134,6 +142,7 @@ class TelnetHoneypot(asyncio.Protocol):
         self.session_id = ""
         self._buf = b""
         self._pending_iac = b""
+        self._drain_scheduled = False
         self.session: SSHSession | None = None
 
     # ── asyncio.Protocol lifecycle ──────────────────────────────────────────
@@ -153,15 +162,45 @@ class TelnetHoneypot(asyncio.Protocol):
         stream = self._pending_iac + data
         clean, self._pending_iac = _split_telnet_stream(stream)
         self._buf += clean
-        while True:
-            for sep in (b"\r\n", b"\n", b"\r"):
-                if sep in self._buf:
-                    line, self._buf = self._buf.split(sep, 1)
-                    asyncio.get_running_loop().create_task(
-                        self._handle_line(line.decode("utf-8", errors="replace").strip())
-                    )
+        if len(self._buf) > _MAX_BUFFER_BYTES:
+            logger.warning("Telnet peer %s exceeded input buffer — disconnecting", self.peer_ip)
+            self._teardown_session()
+            if self.transport is not None:
+                self.transport.close()
+            return
+        self._schedule_drain()
+
+    def _schedule_drain(self) -> None:
+        """Ensure a drain task is queued (coalesced, self-rescheduling)."""
+        if self._drain_scheduled:
+            return
+        self._drain_scheduled = True
+        try:
+            asyncio.get_running_loop().create_task(self._drain_lines())
+        except RuntimeError:
+            self._drain_scheduled = False
+
+    async def _drain_lines(self) -> None:
+        """Process queued lines in bounded batches so input floods cannot
+        spawn unbounded tasks. Reschedules itself while lines remain."""
+        try:
+            processed = 0
+            while processed < _MAX_LINES_PER_BATCH:
+                line: bytes | None = None
+                for sep in (b"\r\n", b"\n", b"\r"):
+                    if sep in self._buf:
+                        line, self._buf = self._buf.split(sep, 1)
+                        break
+                if line is None:
                     break
-            else:
+                processed += 1
+                await self._handle_line(line.decode("utf-8", errors="replace").strip())
+        finally:
+            self._drain_scheduled = False
+        # More complete lines remain? Re-schedule (yields to the loop between batches)
+        for sep in (b"\r\n", b"\n", b"\r"):
+            if sep in self._buf:
+                self._schedule_drain()
                 break
 
     def connection_lost(self, exc: Exception | None) -> None:

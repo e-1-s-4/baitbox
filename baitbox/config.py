@@ -67,5 +67,27 @@ class Settings:
     # Webhook filtering: only notify for events at/above this threat level
     webhook_min_threat_level: str = os.getenv("BAITBOX_WEBHOOK_MIN_THREAT_LEVEL", "LOW").upper()
 
+    # ── v2.3.0 additions ────────────────────────────────────────────────────
+    # Trust X-Forwarded-For / X-Real-IP headers when deriving the client IP.
+    # Leave disabled (default) unless BaitBox sits behind a trusted reverse
+    # proxy — otherwise attackers can spoof their source IP and evade the
+    # block list and rate limiter.
+    trust_proxy: bool = os.getenv("BAITBOX_TRUST_PROXY", "0").lower() in ("1", "true", "yes")
+
+    # Prometheus /metrics endpoint (protected by dashboard auth)
+    metrics_enabled: bool = os.getenv("BAITBOX_METRICS_ENABLED", "1").lower() not in ("0", "false", "no")
+
+    # Add Strict-Transport-Security header (enable when served over HTTPS)
+    hsts_enabled: bool = os.getenv("BAITBOX_HSTS_ENABLED", "0").lower() in ("1", "true", "yes")
+    hsts_max_age: int = _safe_int("BAITBOX_HSTS_MAX_AGE", 31536000)
+
+    # Memory bounds for interactive sessions
+    max_session_commands: int = _safe_int("BAITBOX_MAX_SESSION_COMMANDS", 500)
+    max_sessions: int = _safe_int("BAITBOX_MAX_SESSIONS", 1000)
+
+    # Webhook delivery: bounded queue + single worker (prevents thread
+    # explosion during credential-stuffing floods)
+    webhook_queue_size: int = _safe_int("BAITBOX_WEBHOOK_QUEUE_SIZE", 500)
+
 
 settings = Settings()

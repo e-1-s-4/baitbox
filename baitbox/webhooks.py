@@ -1,10 +1,16 @@
-"""Discord, Slack, and generic webhook integration for BaitBox telemetry."""
+"""Discord, Slack, and generic webhook integration for BaitBox telemetry.
+
+v2.3.0: delivery moved from one-thread-per-event to a single bounded worker
+queue. Credential-stuffing floods previously spawned unbounded numbers of
+short-lived threads; now overflow events are dropped (with a warning) instead.
+"""
 
 from __future__ import annotations
 import json
 import logging
-import urllib.request
+import queue
 import threading
+import urllib.request
 from typing import Any
 
 from .config import settings
@@ -19,9 +25,39 @@ _GENERIC_PAYLOAD_LIMIT = 60000
 
 _THREAT_RANK = {"LOW": 0, "MEDIUM": 1, "CRITICAL": 2}
 
+_delivery_queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=500)
+_worker_started = False
+_worker_lock = threading.Lock()
+_dropped_count = 0
+
 
 def _threat_rank(level: str | None) -> int:
     return _THREAT_RANK.get((level or "LOW").upper(), 0)
+
+
+def _ensure_worker() -> None:
+    """Start the singleton delivery worker thread (lazily, once)."""
+    global _worker_started
+    with _worker_lock:
+        if _worker_started:
+            return
+        thread = threading.Thread(target=_worker_loop, name="baitbox-webhooks", daemon=True)
+        thread.start()
+        _worker_started = True
+
+
+def _worker_loop() -> None:
+    """Drain the delivery queue; ``None`` is a poison pill for shutdown."""
+    while True:
+        item = _delivery_queue.get()
+        if item is None:
+            break
+        try:
+            _send_webhook_sync(item)
+        except Exception as exc:  # never let delivery kill the worker
+            logger.error("Webhook delivery error: %s", exc)
+        finally:
+            _delivery_queue.task_done()
 
 
 def send_webhook_notification(event: dict[str, Any]) -> None:
@@ -34,9 +70,25 @@ def send_webhook_notification(event: dict[str, Any]) -> None:
     if _threat_rank(event_level) < _threat_rank(minimum):
         return
 
-    # Run in a background thread to avoid blocking main execution flow
-    thread = threading.Thread(target=_send_webhook_sync, args=(event,), daemon=True)
-    thread.start()
+    global _dropped_count
+    _ensure_worker()
+    try:
+        _delivery_queue.put_nowait(event)
+    except queue.Full:
+        _dropped_count += 1
+        if _dropped_count == 1 or _dropped_count % 100 == 0:
+            logger.warning(
+                "Webhook queue full — dropped %s notification(s) total", _dropped_count
+            )
+
+
+def flush_webhooks(timeout: float = 10.0) -> bool:
+    """Block until all queued webhook deliveries completed (used by tests)."""
+    try:
+        _delivery_queue.join()
+        return True
+    except Exception:
+        return False
 
 
 _TRUNCATION_SUFFIX = "\n…[truncated by BaitBox]"

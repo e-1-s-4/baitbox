@@ -14,9 +14,10 @@ from rich.table import Table
 
 from .async_bridge import set_main_loop
 from .config import settings
-from .db import init_db, load_blocked_ips, prune_events
+from .db import close_db, init_db, load_blocked_ips, prune_events
+from . import __version__
 from .ratelimit import load_blocked_ips as apply_blocked_ips
-from .servers.http_server import APP_VERSION, app
+from .servers.http_server import app
 from .servers.ssh_server import start_ssh_server
 from .sessions import session_manager
 
@@ -106,7 +107,7 @@ async def main() -> None:
 
     console.print(Panel(
         table,
-        title=f"[bold green]🪤  BaitBox Honeypot v{APP_VERSION}[/bold green]",
+        title=f"[bold green]🪤  BaitBox Honeypot v{__version__}[/bold green]",
         subtitle="[dim]Trap attackers. Capture intel. Stay safe.[/dim]",
         border_style="green",
         expand=False,
@@ -166,6 +167,14 @@ async def main() -> None:
         await retention_task
     except asyncio.CancelledError:
         pass
+
+    # Release database connections cleanly (WAL checkpoint on SQLite,
+    # pool teardown on PostgreSQL) so restarts never see stale locks.
+    try:
+        await close_db()
+        logger.info("Database connections closed")
+    except Exception as exc:
+        logger.warning("Error closing database: %s", exc)
 
     logger.info("BaitBox shutdown complete")
 

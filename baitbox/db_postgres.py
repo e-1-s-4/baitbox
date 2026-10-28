@@ -182,6 +182,7 @@ class PostgresDB:
         protocol: Optional[str] = None,
         src_ip: Optional[str] = None,
         event_type: Optional[str] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         clauses = []
         params: list[Any] = []
@@ -196,10 +197,11 @@ class PostgresDB:
             clauses.append(f"event_type = ${len(params)}")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
+        params.append(max(0, offset))
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ${len(params)}",
+                f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}",
                 *params,
             )
             return [self._decode_row(row) for row in reversed(rows)]
@@ -354,3 +356,11 @@ class PostgresDB:
                 username,
             )
         return row["password_hash"] if row else None
+
+    async def close(self) -> None:
+        """Release the connection pool (used on graceful shutdown)."""
+        if self._pool is not None:
+            try:
+                await self._pool.close()
+            finally:
+                self._pool = None
