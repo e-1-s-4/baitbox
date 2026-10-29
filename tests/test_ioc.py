@@ -109,3 +109,21 @@ def test_malformed_ips_are_skipped():
     feed = build_ioc_feed(events, blocked_ips=[])
     assert not feed["malicious_ips"]
     reset_metrics()
+
+
+def test_ioc_tolerates_malformed_fields():
+    """Mixed-type timestamps and unhashable protocols/types must not crash."""
+    reset_metrics()
+    events = [
+        {"src_ip": "203.0.113.60", "protocol": ["SSH"], "event_type": {"a": 1},
+         "payload": {"username": ["root"]}, "timestamp": {"bad": "type"}},
+        {"src_ip": "203.0.113.60", "protocol": "SSH", "event_type": "auth_attempt",
+         "payload": {"username": "root", "password": "pw"}, "timestamp": 1234567890},
+        {"src_ip": "203.0.113.60", "protocol": "SSH", "event_type": "command",
+         "payload": {"command": "id"}, "timestamp": None},
+    ]
+    feed = build_ioc_feed(events, blocked_ips=["203.0.113.60"])
+    entry = next(e for e in feed["malicious_ips"] if e["ip"] == "203.0.113.60")
+    assert entry["event_count"] == 3
+    assert entry["blocked"] is True
+    reset_metrics()

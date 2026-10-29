@@ -175,7 +175,7 @@ async def _lookup_remote(ip: str, fallback: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         return fallback
 
-    if not raw or raw.get("status") != "success":
+    if not isinstance(raw, dict) or raw.get("status") != "success":
         return fallback
 
     data = dict(fallback)

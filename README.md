@@ -127,7 +127,7 @@ The dashboard requires authentication. Default credentials:
 | `BAITBOX_DASHBOARD_PASSWORD` | `admin` | Dashboard login password |
 | `BAITBOX_JWT_SECRET` | `baitbox-super-secret-key-change-me` | JWT signing secret — **change this in production** |
 
-All `/api/*` endpoints and the `/ws/feed` WebSocket require a valid JWT session cookie or bearer token. Unauthenticated API requests return **401 Unauthorized**, unauthenticated WebSocket handshakes are rejected with **403 Forbidden**, and unauthenticated dashboard visits are redirected to `/login`. Failed dashboard logins are rate-limited per IP (default: 10 attempts per 5 minutes → HTTP 429).
+All `/api/*` endpoints and the `/ws/feed` WebSocket require a valid JWT session cookie or bearer token. Unauthenticated API requests return **401 Unauthorized**, unauthenticated WebSocket handshakes are rejected with **403 Forbidden**, and unauthenticated dashboard visits are redirected to `/login`. The auth-protected `/metrics` endpoint does the same for browsers, but returns a JSON **401** to non-HTML clients (Prometheus does not follow redirects). Failed dashboard logins are rate-limited per IP (default: 10 attempts per 5 minutes → HTTP 429).
 
 ## ⚙️ Configuration
 

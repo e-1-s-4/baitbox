@@ -57,3 +57,17 @@ def test_metrics_escapes_label_characters():
     stats["by_protocol"].append({"protocol": 'Weird"Proto', "count": 1})
     payload = build_prometheus_metrics(stats, blocked_count=0, session_count=0)
     assert 'protocol="Weird\\"Proto"' in payload
+
+
+def test_metrics_tolerates_malformed_stats():
+    # None, non-dict rows and non-numeric counts must not raise
+    assert build_prometheus_metrics(None, blocked_count=0, session_count=0).startswith("# HELP")
+    stats = {
+        "total_events": "not-a-number",
+        "by_protocol": None,
+        "by_event_type": [1, 2, {"event_type": "command", "count": "x"}],
+    }
+    payload = build_prometheus_metrics(stats, blocked_count=-1, session_count=10**9)
+    assert "baitbox_events_total 0" in payload
+    assert 'baitbox_events_type_total{event_type="command"} 0' in payload
+    assert "baitbox_blocked_ips -1" in payload

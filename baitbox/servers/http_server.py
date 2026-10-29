@@ -216,9 +216,15 @@ class AuthMiddleware:
             username = verify_jwt_token(token) if token else None
             if not username:
                 if scope["type"] == "websocket":
-                    await self._send_http_error(send, 403, "Forbidden")
+                    await self._reject_websocket(send, 1008)
                     return
                 elif path.startswith("/api/"):
+                    await self._send_http_error(send, 401, "Unauthorized")
+                    return
+                elif path == "/metrics" and "text/html" not in headers.get(b"accept", b"").decode("utf-8").lower():
+                    # Machine endpoint: a JSON 401 is clearer to Prometheus (which
+                    # does not follow redirects) than a bounce to /login. Browsers
+                    # that navigate here still get the login page.
                     await self._send_http_error(send, 401, "Unauthorized")
                     return
                 else:
@@ -226,6 +232,14 @@ class AuthMiddleware:
                     return
 
         await self.app(scope, receive, send)
+
+    async def _reject_websocket(self, send: Send, code: int = 1008) -> None:
+        """Refuse a WebSocket upgrade before accept (client sees HTTP 403).
+
+        Sending an ``http.response.start`` message on a websocket scope is
+        invalid ASGI and makes uvicorn raise, so close the handshake instead.
+        """
+        await send({"type": "websocket.close", "code": code})
 
     async def _send_http_error(self, send: Send, status_code: int, message: str) -> None:
         await send({
@@ -257,6 +271,22 @@ class AuthMiddleware:
 class SecurityHeadersMiddleware:
     """Add baseline security headers to dashboard responses."""
 
+    # Content-Security-Policy for the dashboard/login HTML. The UI relies on
+    # inline scripts, inline event handlers and inline styles, so 'unsafe-inline'
+    # is required; the value here is tightening every *external* source, locking
+    # down object/base/framing, and giving the XSS-mitigating backstop.
+    DASHBOARD_CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data: https://unpkg.com https://server.arcgisonline.com; "
+        "connect-src 'self' ws: wss:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    )
+
     def __init__(self, app: ASGIApp):
         self.app = app
 
@@ -275,6 +305,13 @@ class SecurityHeadersMiddleware:
                 ]
                 if settings.hsts_enabled:
                     extra.append((b"strict-transport-security", f"max-age={settings.hsts_max_age}; includeSubDomains".encode()))
+                content_type = ""
+                for key, value in headers:
+                    if key.lower() == b"content-type":
+                        content_type = value.decode("latin-1").lower()
+                        break
+                if "text/html" in content_type:
+                    extra.append((b"content-security-policy", self.DASHBOARD_CSP.encode()))
                 existing = {k.lower() for k, _ in headers}
                 for key, value in extra:
                     if key not in existing:
@@ -672,7 +709,11 @@ async def _request_payload(request: Request) -> dict[str, Any]:
         try:
             if "application/json" in content_type:
                 try:
-                    form_data = json.loads(body.decode("utf-8", errors="replace"))
+                    parsed_json = json.loads(body.decode("utf-8", errors="replace"))
+                    if isinstance(parsed_json, dict):
+                        form_data = parsed_json
+                    else:
+                        form_data = {"raw_body": parsed_json}
                 except json.JSONDecodeError:
                     form_data = {"raw_body": body.decode("utf-8", errors="replace")}
             elif "form" in content_type:
@@ -962,7 +1003,9 @@ async def api_simulate_attack(request: Request) -> dict[str, Any]:
 
     body: dict[str, Any] = {}
     try:
-        body = await request.json()
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
     except Exception:
         pass
     scenario = body.get("scenario", "ssh_bruteforce")

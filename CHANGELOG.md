@@ -5,6 +5,47 @@ All notable changes to BaitBox are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Fake-shell crash on `man <cmd>`**: the handler called `.format()` on a
+  `bytes` literal, raising `AttributeError` and tearing down the SSH/telnet
+  shell. It now returns a proper `No manual entry for <cmd>` line.
+- **`$USERNAME` / `$LOGNAME` expansion**: environment variables are now
+  substituted longest-name-first, so `echo $USERNAME` no longer yields
+  `rootNAME` (the earlier `$USER` replacement clobbered it).
+- **Standalone text filters** (`sort`, `uniq`, `cut`, `tr`, `tac`, `xargs`,
+  `egrep`, `fgrep`) returned a bare `bytes` object instead of an
+  `(output, should_close)` tuple — crashing the caller — and read nothing when
+  given a file operand (e.g. `sort /etc/passwd`). They now return a tuple and
+  read their file operands from the VFS.
+- **`tr` ranges and character classes**: `tr a-z A-Z` (and `[:upper:]`,
+  `[:lower:]`, `[:digit:]`, …) now expand correctly instead of being treated as
+  three literal characters by `str.maketrans`.
+- **`awk`/`gawk` file operands**: `awk '{print $N}' file` now actually applies
+  the program instead of echoing the whole file back untouched.
+- **`sed`** now applies the common expression forms — `s/RE/REPL/[gi]`,
+  `Np`/`N,Mp` (with `-n`), `Nd`/`N,Md` and `/RE/d` — instead of returning the
+  file verbatim.
+- **`tac <file>`** now reverses the file's lines (it previously behaved like
+  `cat`), and **`xargs`** defaults to `echo` / runs an explicit command with the
+  piped tokens appended instead of passing stdin straight through.
+- **Tab completion crash**: `complete_input` raised `IndexError` for
+  whitespace-only/control-character buffers (e.g. a lone `\r`); it now handles
+  them, and the SSH shell loop guards the call.
+- **Unauthenticated WebSocket upgrades** now return a clean rejection
+  (`websocket.close` → HTTP 403) instead of emitting an HTTP-scoped ASGI message
+  that made uvicorn raise a `RuntimeError`/500 and log a stack trace.
+- **`POST /api/simulate` 500**: a JSON body that was not an object (array,
+  string, number) raised `AttributeError`; non-dict bodies are now ignored.
+- **HTTP body logging** (`_request_payload`) coerces a non-object JSON body
+  into a `raw_body` wrapper so downstream `.get()` calls never see a list/scalar.
+- **GeoIP** ignores non-object responses from the upstream API instead of
+  raising.
+- **`/metrics`** tolerates `None`/malformed stats, non-dict aggregate rows and
+  non-numeric counts, keeping the scrape endpoint live.
+- **`/api/ioc`** tolerates mixed-type timestamps and unhashable
+  protocol/event-type values so one malformed event cannot break the feed.
+- **Login page overflow**: `body { overflow: hidden }` clipped the login card
+  on short viewports with no way to scroll; it now allows vertical scrolling
+  and uses `100dvh`.
 - **Docker build**: the unprivileged `honeypot` user is created before the code is copied, so `COPY --chown` no longer fails; the image also pins `BAITBOX_DASHBOARD_PORT=8000`.
 - **Default dashboard port** is now consistently `8000` (config previously defaulted to `3000` while Docker, compose, docs and the dashboard all used `8000`).
 - **Test suite** is fully isolated and exits cleanly: every test gets its own SQLite file, the shared `aiosqlite` connection is closed after each test (no more Windows `WinError 32` or hanging non-daemon threads), and no `baitbox.db` is left in the checkout.
@@ -20,8 +61,32 @@ All notable changes to BaitBox are documented here.
 - **Demo telemetry seeding is opt-in** (`BAITBOX_SEED_DEMO_DATA=1`) so fabricated attackers never pollute production data.
 - API documentation routes (`/docs`, `/redoc`, `/openapi.json`) are disabled so honeypot visitors cannot enumerate the real API surface.
 
+### Security
+- **Dashboard stored-XSS hardening**: attacker-controlled fields (`src_ip`,
+  which can come from `X-Forwarded-For` when `BAITBOX_TRUST_PROXY=1`,
+  `protocol`, `event_type`, and GeoIP city/country) are now HTML-escaped
+  everywhere they are rendered, and IP values injected into inline handler
+  attributes are constrained to an IP-shaped allowlist (`safeIp`). Covers the
+  event feed, session cards, Top-IPs leaderboard and the Leaflet map popups.
+- **Content-Security-Policy** on dashboard/login HTML responses: external
+  sources are restricted to the specific CDNs, font hosts and map-tile host the
+  UI needs, with `object-src 'none'`, `base-uri 'self'` and
+  `frame-ancestors 'none'` as extra XSS/clickjacking backstops. Inline assets
+  stay allowed because the dashboard is built on them.
+- **`/metrics` negotiation**: unauthenticated machine scrapers now receive a
+  JSON `401` (Prometheus does not follow redirects) while browser navigations
+  still bounce to `/login`.
+
 ### Added
-- `.env.example`, `.dockerignore`, and the GitHub Actions CI workflow (pytest 3.11/3.12 + Docker build).
+- Regression tests covering every fix above (fake-shell robustness, `tr`
+  ranges, `/api/simulate` non-dict bodies, metrics/IOC malformed input,
+  dashboard escaping helpers).
+- **PostgreSQL backend test coverage** using in-memory asyncpg fakes (SQL
+  building/parameter binding, row decoding, GeoIP/blocklist/prune roundtrips,
+  schema init and cross-backend interface conformance) — no live DB required.
+- **Static Docker validation tests** for `Dockerfile`/`docker-compose.yml`
+  invariants (unprivileged user before `COPY --chown`, internal port, health
+  probes, published ports and the Postgres wiring).
 - `python -m baitbox` entry point and a `baitbox` console script; `pyproject.toml` now declares runtime dependencies and package data.
 - STIX 2.1 output for the IOC feed (`/api/ioc?format=stix`).
 

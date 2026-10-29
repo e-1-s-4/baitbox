@@ -349,9 +349,103 @@ def _expand_vars(text: str, session: SSHSession) -> str:
         return variables.get(match.group(1), "")
 
     expanded = re.sub(r"\$\{(\w+)\}", _sub_braced, text)
-    for name, value in variables.items():
+    # Substitute longer names first so ``$USERNAME`` is not clobbered by an
+    # earlier ``$USER`` replacement (which would leave ``rootNAME`` behind).
+    for name, value in sorted(variables.items(), key=lambda kv: len(kv[0]), reverse=True):
         expanded = expanded.replace(f"${name}", value)
     return expanded
+
+
+_TR_CLASSES: dict[str, list[str]] = {
+    "upper": [chr(c) for c in range(65, 91)],
+    "lower": [chr(c) for c in range(97, 123)],
+    "alpha": [chr(c) for c in range(65, 91)] + [chr(c) for c in range(97, 123)],
+    "digit": [str(d) for d in range(10)],
+    "alnum": [chr(c) for c in range(48, 58)]
+    + [chr(c) for c in range(65, 91)]
+    + [chr(c) for c in range(97, 123)],
+    "space": [" ", "\t", "\n", "\r", "\v", "\f"],
+    "punct": list("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+}
+
+
+def _expand_tr_set(spec: str) -> list[str]:
+    """Expand a ``tr`` character set, honouring ``a-z`` ranges and ``[:class:]``.
+
+    ``str.maketrans`` treats ``a-z`` as the three literal characters ``a``,
+    ``-`` and ``z``; real ``tr`` expands the range, so we do that here.
+    """
+    chars: list[str] = []
+    i = 0
+    n = len(spec)
+    while i < n:
+        if spec[i] == "[" and i + 1 < n and spec[i + 1] == ":":
+            end = spec.find(":]", i + 2)
+            if end != -1:
+                chars.extend(_TR_CLASSES.get(spec[i + 2 : end], []))
+                i = end + 2
+                continue
+        if i + 2 < n and spec[i + 1] == "-" and ord(spec[i]) <= ord(spec[i + 2]):
+            chars.extend(chr(c) for c in range(ord(spec[i]), ord(spec[i + 2]) + 1))
+            i += 3
+        else:
+            chars.append(spec[i])
+            i += 1
+    return chars
+
+
+def _run_sed(script: str, lines: list[str], flags: list[str]) -> list[str]:
+    """Apply a small, safe subset of ``sed`` expressions.
+
+    Covers the forms that turn up during recon:
+
+    * ``s<delim>PAT<delim>REPL<delim>[gi]`` substitution (any delimiter)
+    * ``Np`` / ``N,Mp`` addressed printing (used with ``-n``)
+    * ``Nd`` / ``N,Md`` addressed deletion
+    * ``/RE/d`` pattern deletion
+
+    Anything unrecognised passes the input through unchanged rather than
+    erroring, which keeps the fake shell forgiving.
+    """
+    suppress = "-n" in flags
+    result: list[str] = []
+
+    sub = re.match(r"^s(.)(.*?)\1(.*?)\1([gGiI]*)$", script)
+    ranged = re.match(r"^(\d+)(?:,(\d+))?([pd])$", script)
+    pattern_del = re.match(r"^/(.*)/d$", script)
+
+    start = end = 0
+    action = ""
+    if ranged:
+        start = int(ranged.group(1))
+        end = int(ranged.group(2)) if ranged.group(2) else start
+        action = ranged.group(3)
+
+    for idx, line in enumerate(lines, start=1):
+        if sub:
+            _delim, pat, repl, opts = sub.groups()
+            re_flags = re.IGNORECASE if "i" in opts.lower() else 0
+            count = 0 if "g" in opts.lower() else 1
+            try:
+                result.append(re.sub(pat, repl, line, count=count, flags=re_flags))
+            except re.error:
+                result.append(line)
+        elif ranged and start <= idx <= end:
+            if action == "p":
+                result.append(line)
+            # ``d`` -> drop the line entirely
+        elif ranged:
+            if not suppress:
+                result.append(line)
+        elif pattern_del:
+            try:
+                if not re.search(pattern_del.group(1), line):
+                    result.append(line)
+            except re.error:
+                result.append(line)
+        else:
+            result.append(line)
+    return result
 
 
 def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> bytes:
@@ -375,6 +469,22 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
         if content is None:
             return f"{executable}: {operands[0]}: No such file or directory\r\n".encode()
         return content
+
+    # Standalone invocation with file operand(s), e.g. ``sort /etc/passwd`` or
+    # ``awk '{print $1}' /etc/passwd``: fall back to reading those files as the
+    # input stream when nothing was piped in. Non-file operands (delimiters,
+    # scripts, character sets) simply do not resolve to VFS entries and are
+    # skipped.
+    if not stdin_data and operands and executable in {"sort", "uniq", "cut", "tr", "tac", "xargs", "awk", "gawk", "sed"}:
+        loaded_files = [
+            loaded
+            for candidate in operands
+            if (loaded := session.vfs.read_file(
+                session.vfs._normalize_path(session.cwd, candidate)
+            )) is not None
+        ]
+        if loaded_files:
+            stdin_data = b"\n".join(f.rstrip(b"\n") for f in loaded_files) + b"\n"
 
     text = stdin_data.decode("utf-8", errors="replace")
     lines = text.splitlines()
@@ -522,12 +632,26 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
     if executable == "tr":
         sets = [a for a in parts[1:] if not a.startswith("-")]
         if len(sets) >= 2:
-            src, dst = sets[0], sets[1]
-            table = str.maketrans(src, dst[: len(src)].ljust(len(src), dst[-1]))
-            return text.translate(table).encode()
+            src_chars = _expand_tr_set(sets[0])
+            dst_chars = _expand_tr_set(sets[1])
+            if src_chars and dst_chars:
+                if len(dst_chars) < len(src_chars):
+                    # POSIX tr extends the last SET2 character to match SET1.
+                    dst_chars += [dst_chars[-1]] * (len(src_chars) - len(dst_chars))
+                table = {ord(s): d for s, d in zip(src_chars, dst_chars)}
+                return text.translate(table).encode()
+            return text.encode()
         if "-d" in flags and sets:
-            return text.replace(sets[0], "").encode()
+            delete_chars = set(_expand_tr_set(sets[0]))
+            return "".join(ch for ch in text if ch not in delete_chars).encode()
         return stdin_data
+
+    if executable == "sed":
+        if not operands:
+            return b"sed: missing script operand\r\n"
+        script = operands[0]
+        edited = _run_sed(script, lines, flags)
+        return ("\r\n".join(edited) + "\r\n").encode() if edited else b""
 
     if executable in {"awk", "gawk"}:
         match = re.search(r"\{.*print\s+\$?(\d+)\s*\}", stage)
@@ -549,7 +673,11 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             if executable == "tac":
                 return ("\r\n".join(reversed(lines)) + "\r\n").encode() if lines else b""
             return stdin_data
-        return load_operand_file() or b""
+        loaded = load_operand_file() or b""
+        if executable == "tac":
+            tac_lines = loaded.decode("utf-8", errors="replace").splitlines()
+            return ("\r\n".join(reversed(tac_lines)) + "\r\n").encode() if tac_lines else b""
+        return loaded
 
     if executable == "base64":
         import base64 as b64
@@ -577,7 +705,17 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
         return f"{algo(normalized).hexdigest()}  {label}\r\n".encode()
 
     if executable == "xargs":
-        return stdin_data
+        tokens = text.split()
+        if not tokens:
+            return b""
+        command_operands = list(operands)
+        # ``xargs`` with no command defaults to ``echo``; with a command it runs
+        # that command with the tokens appended (single level, to avoid loops).
+        if command_operands and "xargs" not in command_operands:
+            sub = " ".join(command_operands + tokens)
+            output, _ = execute_session_command(session, sub)
+            return output
+        return (" ".join(tokens) + "\r\n").encode()
 
     if executable == "true":
         return b""
@@ -630,7 +768,13 @@ def _run_pipeline(session: SSHSession, segment: str) -> tuple[bytes, bool]:
     stages = [stage for stage in _split_pipeline(segment) if stage]
     if not stages:
         return b"", False
-    output, should_close = _dispatch_command(session, stages[0], piped=len(stages) > 1)
+    result = _dispatch_command(session, stages[0], piped=len(stages) > 1)
+    # Guard against a handler accidentally returning only bytes (or None)
+    # instead of a ``(output, should_close)`` tuple.
+    if isinstance(result, tuple):
+        output, should_close = result
+    else:
+        output, should_close = (result or b""), False
     for stage in stages[1:]:
         output = _apply_stdin_filter(session, stage, output)
     return output, should_close
@@ -1287,7 +1431,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
     if executable == "man":
         if not args:
             return b"What manual page do you want?\r\n", False
-        return b"No manual entry for {}\r\n".format(args[0]).encode(), False
+        return f"No manual entry for {args[0]}\r\n".encode(), False
 
     if executable == "dpkg":
         if not args:
@@ -1348,16 +1492,11 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             return f"{h}  {target}\r\n".encode(), False
         return b"", False
 
-    if executable in {"awk", "sed"}:
-        if not args:
-            return f"{executable}: missing script/file operand\r\n".encode(), False
-        target = args[-1] if not args[-1].startswith("-") else None
-        if target:
-            fpath = session.vfs._normalize_path(session.cwd, target)
-            content = session.vfs.read_file(fpath)
-            if content is not None:
-                return content.replace(b"\n", b"\r\n"), False
-        return b"", False
+    if executable in {"awk", "gawk", "sed"}:
+        # Route through the shared filter so the program is actually applied
+        # (e.g. ``awk '{print $1}' /etc/passwd`` extracts the column instead of
+        # echoing the whole file back).
+        return _apply_stdin_filter(session, command, b""), False
 
     if executable in {"nc", "netcat", "ncat", "socat"}:
         return b"Ncat: Connection refused.\r\n", False
@@ -1596,7 +1735,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
     # ── Text processing standalone ──────────────────────────────────────────
 
     if executable in {"sort", "uniq", "cut", "tr", "xargs", "tac"}:
-        return _apply_stdin_filter(session, command, b"")
+        return _apply_stdin_filter(session, command, b""), False
 
     if executable == "seq":
         try:
@@ -2001,7 +2140,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         return b"", False
 
     if executable == "egrep" or executable == "fgrep":
-        return _apply_stdin_filter(session, "grep " + " ".join(args), b"")
+        return _apply_stdin_filter(session, "grep " + " ".join(args), b""), False
 
     # ── Package managers (verbose success) ──────────────────────────────────
 
@@ -2078,7 +2217,7 @@ def complete_input(session: SSHSession, buffer: str) -> tuple[str, list[str]]:
     Returns ``(updated_buffer, candidates)``. ``updated_buffer`` equals
     ``buffer`` when nothing could be completed.
     """
-    if not buffer or buffer.endswith(" "):
+    if not buffer or buffer.endswith(" ") or not buffer.strip():
         token = ""
         head = buffer
         completing_first_word = not buffer.strip()
@@ -2240,7 +2379,11 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
             if command:
                 _log_from_thread(session.src_ip, "command",
                                  {"command": command, "mode": "shell", "session_id": session.session_id})
-                response, should_close = execute_session_command(session, command)
+                try:
+                    response, should_close = execute_session_command(session, command)
+                except Exception:
+                    logger.exception("error executing %r", command)
+                    response, should_close = b"bash: internal error\r\n", False
                 channel.send(response)
                 if should_close:
                     break
@@ -2260,7 +2403,11 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
             channel.send(b"logout\r\n")
             break
         elif char == b"\t":  # Tab completion
-            completed, candidates = complete_input(session, buffer)
+            try:
+                completed, candidates = complete_input(session, buffer)
+            except Exception:
+                logger.exception("tab completion failed")
+                continue
             if len(candidates) == 1 or (completed != buffer and not candidates):
                 buffer = completed
                 _redraw_line(channel, session, buffer)

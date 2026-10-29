@@ -1254,8 +1254,8 @@ async function addToMap(ip, knownGeo = null) {
   }).addTo(map);
   marker._hitCount = 1;
   marker.bindPopup(
-    `<b style="color:#ff4d4d">${ip}</b><br><span style="color:#8ba3c9">${geo.city}, ${geo.country}</span><br>` +
-    `<span style="color:#ffb347">Threat: ${geo.threat_score || 0}%</span>`,
+    `<b style="color:#ff4d4d">${escHtml(safeIp(ip))}</b><br><span style="color:#8ba3c9">${escHtml(geo.city)}, ${escHtml(geo.country)}</span><br>` +
+    `<span style="color:#ffb347">Threat: ${Number(geo.threat_score) || 0}%</span>`,
     { className: 'baitbox-popup' }
   );
   mapMarkers[key] = marker;
@@ -1542,10 +1542,10 @@ function buildEventRow(ev) {
 
   div.innerHTML = `
     <span class="ev-time">${formatTime(ev.timestamp)}</span>
-    <span class="ev-proto ${proto}">${ev.protocol}</span>
-    <span class="ev-ip" onclick="centerMapOnIP('${ev.src_ip}')">${ev.src_ip}</span>
+    <span class="ev-proto ${escHtml(proto)}">${escHtml(ev.protocol || 'UNK')}</span>
+    <span class="ev-ip" onclick="centerMapOnIP('${safeIp(ev.src_ip)}')">${escHtml(ev.src_ip)}</span>
     ${country ? `<span class="ev-country">(${country})</span>` : ''}
-    <span class="ev-type">${ev.event_type}</span>
+    <span class="ev-type">${escHtml(ev.event_type)}</span>
     <span class="ev-threat ${threatClass}" title="${threat}% risk">${threatLabel}</span>
     <div class="ev-body">${escHtml(formatPayload(ev))}</div>
   `;
@@ -1741,7 +1741,7 @@ function renderSessions() {
   el.innerHTML = '';
   sessions.forEach(s => {
     const geo = s.geo || geoCache[s.src_ip] || {};
-    const country = geo.country ? ` · ${geo.countryCode || geo.country}` : '';
+    const country = geo.country ? ` · ${escHtml(geo.countryCode || geo.country)}` : '';
     const card = document.createElement('div');
     card.className = 'session-card';
 
@@ -1757,10 +1757,10 @@ function renderSessions() {
       <div class="session-header">
         <div>
           <div class="session-ip" style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
-            <span>${s.src_ip}${country}</span>
+            <span>${escHtml(s.src_ip)}${country}</span>
             ${threatBadge}
           </div>
-          <div class="session-meta">${escHtml(s.protocol || 'SSH')} · user: ${escHtml(s.username)} · port: ${s.src_port}</div>
+          <div class="session-meta">${escHtml(s.protocol || 'SSH')} · user: ${escHtml(s.username)} · port: ${escHtml(s.src_port)}</div>
         </div>
       </div>
       <div class="session-stats">
@@ -1771,10 +1771,10 @@ function renderSessions() {
       </div>
       ${s.commands.length ? `<div class="session-cmds">${s.commands.slice(-4).map(c => `<div>${escHtml(c.command)}</div>`).join('')}</div>` : ''}
       <div class="session-actions">
-        <button class="btn btn-red" id="kill-${s.session_id}" onclick="killSession('${s.session_id}','${s.src_ip}')">BOOT INTRUDER</button>
-        <button class="btn btn-amber" onclick="blockAndKill('${s.src_ip}')">BLOCK IP</button>
-        <button class="btn" onclick="showTranscript('${s.session_id}')">📜 TRANSCRIPT</button>
-        <button class="btn" onclick="centerMapOnIP('${s.src_ip}')">📍 MAP</button>
+        <button class="btn btn-red" id="kill-${escHtml(s.session_id)}" onclick="killSession('${escHtml(s.session_id)}','${safeIp(s.src_ip)}')">BOOT INTRUDER</button>
+        <button class="btn btn-amber" onclick="blockAndKill('${safeIp(s.src_ip)}')">BLOCK IP</button>
+        <button class="btn" onclick="showTranscript('${escHtml(s.session_id)}')">📜 TRANSCRIPT</button>
+        <button class="btn" onclick="centerMapOnIP('${safeIp(s.src_ip)}')">📍 MAP</button>
       </div>
     `;
     el.appendChild(card);
@@ -1825,10 +1825,10 @@ function renderTopIPs(rows) {
     const div = document.createElement('div');
     div.className = 'lb-row';
     div.innerHTML = `
-      <span class="lb-label" onclick="centerMapOnIP('${r.src_ip}')">${r.src_ip}</span>
+      <span class="lb-label" onclick="centerMapOnIP('${safeIp(r.src_ip)}')">${escHtml(r.src_ip)}</span>
       <div class="lb-bar-wrap"><div class="lb-bar" style="width:${Math.round(r.count/max*100)}%;--bar-start:var(--red);--bar-end:var(--amber)"></div></div>
       <span class="lb-count">${r.count}×</span>
-      <button class="lb-block-btn ${blocked ? 'blocked' : ''}" onclick="${blocked ? `unblockIP('${r.src_ip}')` : `blockAndKill('${r.src_ip}')`}">${blocked ? 'UNBLOCK' : 'BLOCK'}</button>
+      <button class="lb-block-btn ${blocked ? 'blocked' : ''}" onclick="${blocked ? `unblockIP('${safeIp(r.src_ip)}')` : `blockAndKill('${safeIp(r.src_ip)}')`}">${blocked ? 'UNBLOCK' : 'BLOCK'}</button>
     `;
     el.appendChild(div);
   });
@@ -1888,7 +1888,15 @@ function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/* Restrict a value destined for an inline handler / attribute to a safe IP
+   shape. Source IPs can be attacker-controlled when BAITBOX_TRUST_PROXY=1,
+   so never trust them verbatim inside innerHTML. */
+function safeIp(ip) {
+  return (typeof ip === 'string' && /^[0-9a-fA-F:.]{1,45}$/.test(ip)) ? ip : 'unknown';
 }
 
 function formatPayload(ev) {

@@ -47,19 +47,22 @@ def build_ioc_feed(events: list[dict[str, Any]], blocked_ips: list[str] | None =
             "event_count": 0,
             "protocols": set(),
             "event_types": set(),
-            "first_seen": ev.get("timestamp"),
-            "last_seen": ev.get("timestamp"),
+            "first_seen": None,
+            "last_seen": None,
             "usernames": set(),
             "commands": [],
             "probed_paths": [],
         })
         entry["event_count"] += 1
         if ev.get("protocol"):
-            entry["protocols"].add(ev["protocol"])
+            entry["protocols"].add(str(ev["protocol"])[:32])
         if ev.get("event_type"):
-            entry["event_types"].add(ev["event_type"])
+            entry["event_types"].add(str(ev["event_type"])[:64])
         ts = ev.get("timestamp")
-        if ts:
+        if ts is not None:
+            # Coerce to string so mixed timestamp types can never break the
+            # min/max comparison (and a single malformed event cannot 500 /api/ioc).
+            ts = str(ts)
             if entry["first_seen"] is None or ts < entry["first_seen"]:
                 entry["first_seen"] = ts
             if entry["last_seen"] is None or ts > entry["last_seen"]:

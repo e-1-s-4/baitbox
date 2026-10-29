@@ -317,6 +317,128 @@ def test_tab_completion_relative_path_common_prefix():
     assert candidates == []
 
 
+def test_tab_completion_control_chars_do_not_crash():
+    # "\r" splits to no tokens; complete_input used to raise IndexError
+    for buf in ["\r", "\n", "\t", "   ", "  \t "]:
+        completed, candidates = complete_input(make_session(), buf)
+        assert isinstance(completed, str)
+        assert isinstance(candidates, list)
+
+
+# ── Regression: shell robustness (previously crashed the session) ────────────
+
+def test_man_ls_does_not_crash():
+    """``man <cmd>`` used to raise AttributeError bytes.format and kill the shell."""
+    out, close = execute_session_command(make_session(), "man ls")
+    assert not close
+    assert b"No manual entry for ls" in out
+
+
+def test_man_without_args():
+    out, _ = execute_session_command(make_session(), "man")
+    assert b"manual page" in out.lower()
+
+
+def test_expand_vars_longest_name_first():
+    """``$USERNAME`` must not be mangled into ``rootNAME`` by an early ``$USER`` sub."""
+    out, _ = execute_session_command(make_session(), "echo $USERNAME")
+    assert out.strip() == b"root"
+    out2, _ = execute_session_command(make_session(username="ubuntu"), "echo $USERNAME")
+    assert out2.strip() == b"ubuntu"
+    out3, _ = execute_session_command(make_session(), "echo $USER$USERNAME")
+    assert out3.strip() == b"rootroot"
+
+
+def test_standalone_text_filters_return_content():
+    """Standalone sort/uniq/cut/tr/egrep/fgrep used to return a bare bytes object
+    (crashing the caller) and/or read nothing when given a file operand."""
+    cases = {
+        "sort /etc/passwd": b"root",
+        "uniq /etc/passwd": b"root",
+        "cut -d : -f 1 /etc/passwd": b"root",
+        "tr a-z A-Z /etc/hostname": b"WEB-PROD-01",
+        "egrep root /etc/passwd": b"root",
+        "fgrep root /etc/passwd": b"root",
+    }
+    for cmd, needle in cases.items():
+        out, close = execute_session_command(make_session(), cmd)
+        assert not close, cmd
+        assert needle.lower() in out.lower(), f"{cmd!r} -> {out[:80]!r}"
+
+
+def test_piped_text_filters_still_work():
+    out, _ = execute_session_command(make_session(), "cat /etc/passwd | cut -d : -f 1 | sort -u")
+    assert b"root" in out
+    out2, _ = execute_session_command(make_session(), "cat /etc/hostname | tr a-z A-Z")
+    assert b"WEB-PROD-01" in out2
+
+
+def test_tr_supports_ranges_and_classes():
+    # tr must expand a-z, not treat it as three literal characters
+    out, _ = execute_session_command(make_session(), "echo abc | tr a-z A-Z")
+    assert out.startswith(b"ABC")
+    out2, _ = execute_session_command(make_session(), "echo abc | tr '[:lower:]' '[:upper:]'")
+    assert out2.startswith(b"ABC")
+    out3, _ = execute_session_command(make_session(), "echo hello123 | tr -d '[:digit:]'")
+    assert out3.startswith(b"hello")
+
+
 def test_tab_completion_directory_adds_slash():
     completed, _ = complete_input(make_session(), "cd /et")
     assert completed == "cd /etc/"
+
+
+def _space_file_session() -> SSHSession:
+    session = make_session()
+    session.vfs.write_file("/tmp/cols.txt", b"alpha beta gamma\ndelta epsilon zeta\n")
+    return session
+
+
+def test_awk_standalone_applies_program():
+    """``awk '{print $N}' file`` must extract the column, not echo the file."""
+    out, _ = execute_session_command(_space_file_session(), "awk '{print $2}' /tmp/cols.txt")
+    assert out.startswith(b"beta")
+    assert b"epsilon" in out
+    out2, _ = execute_session_command(_space_file_session(), "awk '{print $3}' /tmp/cols.txt")
+    assert out2.startswith(b"gamma")
+
+
+def test_awk_piped_still_applies_program():
+    out, _ = execute_session_command(_space_file_session(), "cat /tmp/cols.txt | awk '{print $1}'")
+    assert out.startswith(b"alpha")
+    assert b"delta" in out
+
+
+def test_sed_substitution_and_addresses():
+    # global substitution
+    out, _ = execute_session_command(make_session(), "sed 's/root/ROOT/g' /etc/passwd")
+    assert b"ROOT:x:0:0:ROOT" in out
+    assert b"root:x" not in out
+    # -n with addressed print
+    out2, _ = execute_session_command(make_session(), "sed -n '1p' /etc/passwd")
+    assert out2.count(b"\r\n") == 1
+    assert b"root" in out2
+    # addressed deletion
+    out3, _ = execute_session_command(make_session(), "sed '1,2d' /etc/passwd")
+    assert b"root:x:0" not in out3
+    # pattern deletion
+    out4, _ = execute_session_command(make_session(), "sed '/nologin/d' /etc/passwd")
+    assert b"nologin" not in out4
+
+
+def test_sed_piped_substitution():
+    out, _ = execute_session_command(make_session(), "cat /etc/hostname | sed 's/web/WEB/'")
+    assert out.startswith(b"WEB-prod-01")
+
+
+def test_tac_reverses_file_operand():
+    out, _ = execute_session_command(make_session(), "tac /etc/passwd")
+    lines = out.decode().split("\r\n")
+    assert lines[0].startswith("nobody"), lines[:2]
+
+
+def test_xargs_default_echo_and_command():
+    out, _ = execute_session_command(make_session(), "echo hello world | xargs")
+    assert out.strip() == b"hello world"
+    out2, _ = execute_session_command(make_session(), "echo /etc/hostname | xargs cat")
+    assert b"web-prod-01" in out2

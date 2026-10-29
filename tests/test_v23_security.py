@@ -54,6 +54,27 @@ def test_revoked_token_cannot_reach_websocket_auth():
     assert verify_jwt_token(token) is None
 
 
+def test_websocket_requires_auth():
+    """Unauthenticated WebSocket upgrades must be rejected cleanly (no ASGI 500)."""
+    from starlette.websockets import WebSocketDisconnect
+
+    c = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/ws/feed"):
+            pass  # pragma: no cover - handshake should be refused
+
+
+def test_websocket_rejects_revoked_token():
+    from starlette.websockets import WebSocketDisconnect
+
+    token = create_jwt_token("admin")
+    _revoke_token(token)
+    c = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect(f"/ws/feed?token={token}"):
+            pass  # pragma: no cover
+
+
 def test_unrelated_token_not_affected_by_revocation():
     keep = create_jwt_token("admin")
     burn = create_jwt_token("admin")
@@ -71,10 +92,14 @@ def test_token_contains_jti_and_iat():
 
 
 def test_metrics_route_requires_auth(client):
-    resp = client.get("/metrics", follow_redirects=False)
-    # Unauthenticated dashboard routes bounce to /login (307), never serve data
+    # A browser navigation (Accept: text/html) bounces to /login…
+    resp = client.get("/metrics", follow_redirects=False, headers={"Accept": "text/html"})
     assert resp.status_code == 307
     assert resp.headers["location"] == "/login"
+    # …while a Prometheus scraper gets a clean 401 rather than a redirect it
+    # would not follow (TestClient's default Accept is */*).
+    resp2 = client.get("/metrics", follow_redirects=False)
+    assert resp2.status_code == 401
 
 
 def test_ioc_route_requires_auth(client):
@@ -93,3 +118,37 @@ def test_metrics_route_serves_prometheus_when_authenticated(client, monkeypatch)
     assert resp.status_code == 200
     assert "baitbox_events_total" in resp.text
     assert "text/plain" in resp.headers["content-type"]
+
+
+def test_login_html_has_content_security_policy(client):
+    resp = client.get("/login")
+    assert resp.status_code == 200
+    csp = resp.headers.get("content-security-policy", "")
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    # External sources the dashboard legitimately needs must be allow-listed
+    assert "https://unpkg.com" in csp
+    assert "https://cdn.jsdelivr.net" in csp
+    assert "https://fonts.googleapis.com" in csp
+    assert "https://fonts.gstatic.com" in csp
+    assert "https://server.arcgisonline.com" in csp
+
+
+def test_dashboard_html_has_content_security_policy(client, monkeypatch):
+    from baitbox.servers import http_server
+
+    monkeypatch.setattr(
+        http_server, "verify_jwt_token", lambda token: "admin" if token else None
+    )
+    client.cookies.set("session_token", "fake-token-for-test")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "content-security-policy" in resp.headers
+
+
+def test_non_html_response_has_no_csp(client):
+    resp = client.get("/healthz")
+    assert "text/html" not in resp.headers.get("content-type", "")
+    assert "content-security-policy" not in resp.headers

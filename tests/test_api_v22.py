@@ -75,6 +75,60 @@ class ApiV22Tests(unittest.TestCase):
     def test_app_version_bumped(self):
         self.assertEqual(APP_VERSION, "2.3.0")
 
+    def test_simulate_accepts_non_dict_json(self):
+        """A JSON array body must not 500 the authenticated simulate endpoint."""
+        response = self.client.post(
+            "/api/simulate",
+            json=[1, 2, 3],
+            cookies={"session_token": self.token},
+        )
+        self.assertNotEqual(response.status_code, 500)
+        self.assertIn(response.status_code, (200, 400, 422))
+
+    def test_simulate_scalar_json(self):
+        response = self.client.post(
+            "/api/simulate",
+            content=b"12345",
+            headers={"Content-Type": "application/json"},
+            cookies={"session_token": self.token},
+        )
+        self.assertNotEqual(response.status_code, 500)
+
+    def test_request_payload_non_dict_json_is_coerced(self):
+        """_request_payload must always return a dict for logged events."""
+        import asyncio
+        from starlette.requests import Request
+        from baitbox.servers.http_server import _request_payload
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/x",
+            "raw_path": b"/x",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("test", 80),
+        }
+        body = b"[1, 2, 3]"
+        sent = False
+
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request(scope, receive)
+        payload = asyncio.run(_request_payload(request))
+        self.assertIsInstance(payload, dict)
+        self.assertIsInstance(payload.get("body"), dict)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,11 +52,14 @@
       background: var(--bg-base);
       color: var(--text-primary);
       min-height: 100vh;
+      min-height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      overflow: hidden;
+      /* Allow scrolling when the viewport is shorter than the card (e.g. a
+         landscape phone) — overflow:hidden clipped it with no way to scroll. */
+      overflow-x: hidden;
       position: relative;
     }
 
