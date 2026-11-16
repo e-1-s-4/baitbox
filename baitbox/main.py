@@ -121,6 +121,13 @@ async def main() -> None:
         logger.info("Database initialized successfully")
         if settings.seed_demo_data:
             await seed_initial_telemetry()
+        from .db import get_recent_events
+        from .anomaly import rehydrate_from_events, get_attack_summary
+        if get_attack_summary().get("total_tracked_ips", 0) == 0:
+            historical = await get_recent_events(limit=2000)
+            if historical:
+                rehydrated = rehydrate_from_events(historical)
+                logger.info("Rehydrated anomaly telemetry from %s stored event(s)", rehydrated)
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 

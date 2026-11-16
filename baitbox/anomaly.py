@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
@@ -40,6 +41,8 @@ _events_since_prune = 0
 # Cap per-IP stored signature matches so repeated hits from a single
 # attacker cannot grow memory without bound.
 _MAX_INDICATORS_PER_IP = 20
+
+_STATE_LOCK = threading.RLock()
 
 
 # ── MITRE ATT&CK Technique Definitions ──────────────────────────────────────
@@ -145,24 +148,25 @@ def _clean_old_timestamps(lst: List[float], now: float, window: float = 60.0) ->
 
 def prune_metrics(max_ips: int = _MAX_TRACKED_IPS, idle_seconds: float = _IDLE_SECONDS) -> int:
     """Drop idle IP entries when the tracking table grows too large."""
-    now = time.time()
-    if len(_ip_metrics) <= max_ips:
-        return 0
-    stale = [
-        ip for ip, last in _last_activity.items()
-        if now - last > idle_seconds
-    ]
-    for ip in stale:
-        _ip_metrics.pop(ip, None)
-        _last_activity.pop(ip, None)
-
-    # Still too large? Evict the least recently active half.
-    if len(_ip_metrics) > max_ips:
-        ordered = sorted(_last_activity.items(), key=lambda kv: kv[1])
-        for ip, _ in ordered[: len(ordered) // 2]:
+    with _STATE_LOCK:
+        now = time.time()
+        if len(_ip_metrics) <= max_ips:
+            return 0
+        stale = [
+            ip for ip, last in _last_activity.items()
+            if now - last > idle_seconds
+        ]
+        for ip in stale:
             _ip_metrics.pop(ip, None)
             _last_activity.pop(ip, None)
-    return len(stale)
+
+        # Still too large? Evict the least recently active half.
+        if len(_ip_metrics) > max_ips:
+            ordered = sorted(_last_activity.items(), key=lambda kv: kv[1])
+            for ip, _ in ordered[: len(ordered) // 2]:
+                _ip_metrics.pop(ip, None)
+                _last_activity.pop(ip, None)
+        return len(stale)
 
 
 def _record_indicators(metrics: Dict[str, Any], hits: List[Dict[str, Any]]) -> None:
@@ -175,13 +179,14 @@ def _record_indicators(metrics: Dict[str, Any], hits: List[Dict[str, Any]]) -> N
 
 def reset_metrics(ip: str | None = None) -> None:
     """Clear in-memory anomaly metrics (used by tests)."""
-    if ip is None:
-        _ip_metrics.clear()
-        _last_activity.clear()
-        _attack_stats.clear()
-    else:
-        _ip_metrics.pop(ip, None)
-        _last_activity.pop(ip, None)
+    with _STATE_LOCK:
+        if ip is None:
+            _ip_metrics.clear()
+            _last_activity.clear()
+            _attack_stats.clear()
+        else:
+            _ip_metrics.pop(ip, None)
+            _last_activity.pop(ip, None)
 
 
 def detect_cryptominer(text: str) -> List[Dict[str, Any]]:
@@ -278,80 +283,81 @@ def get_threat_score(ip: str) -> Dict[str, Any]:
     Calculate the cumulative threat score and level for a given IP address.
     Returns a dict with threat_score, threat_level, reasons, indicators, and MITRE techniques.
     """
-    # Use .get() so querying an IP we have never observed does not create an
-    # entry (dashboard/IOC reads would otherwise grow the map without bound).
-    metrics = _ip_metrics.get(ip) or _empty_metrics()
-    now = time.time()
+    with _STATE_LOCK:
+        # Use .get() so querying an IP we have never observed does not create an
+        # entry (dashboard/IOC reads would otherwise grow the map without bound).
+        metrics = _ip_metrics.get(ip) or _empty_metrics()
+        now = time.time()
 
-    # Clean up old timestamps
-    metrics["auth_attempts"] = _clean_old_timestamps(metrics["auth_attempts"], now)
-    metrics["commands"] = _clean_old_timestamps(metrics["commands"], now)
+        # Clean up old timestamps
+        metrics["auth_attempts"] = _clean_old_timestamps(metrics["auth_attempts"], now)
+        metrics["commands"] = _clean_old_timestamps(metrics["commands"], now)
 
-    score = 0
-    reasons: List[str] = []
+        score = 0
+        reasons: List[str] = []
 
-    # 1. Auth attempt frequency (bot-like password guessing)
-    attempts_10s = len([t for t in metrics["auth_attempts"] if now - t <= 10.0])
-    if attempts_10s > 3:
-        score += 30
-        reasons.append(f"High frequency of login attempts ({attempts_10s} in last 10s)")
-    elif len(metrics["auth_attempts"]) > 5:
-        score += 15
-        reasons.append("Multiple failed login attempts")
+        # 1. Auth attempt frequency (bot-like password guessing)
+        attempts_10s = len([t for t in metrics["auth_attempts"] if now - t <= 10.0])
+        if attempts_10s > 3:
+            score += 30
+            reasons.append(f"High frequency of login attempts ({attempts_10s} in last 10s)")
+        elif len(metrics["auth_attempts"]) > 5:
+            score += 15
+            reasons.append("Multiple failed login attempts")
 
-    # 2. Command execution frequency (rapid command execution)
-    cmds_5s = len([t for t in metrics["commands"] if now - t <= 5.0])
-    if cmds_5s > 4:
-        score += 35
-        reasons.append(f"Rapid command execution ({cmds_5s} in last 5s)")
+        # 2. Command execution frequency (rapid command execution)
+        cmds_5s = len([t for t in metrics["commands"] if now - t <= 5.0])
+        if cmds_5s > 4:
+            score += 35
+            reasons.append(f"Rapid command execution ({cmds_5s} in last 5s)")
 
-    # 3. High risk command patterns
-    if metrics["high_risk_detected"]:
-        score += 30
-        reasons.append("Flagged high-risk commands (e.g. wget, curl, chmod)")
+        # 3. High risk command patterns
+        if metrics["high_risk_detected"]:
+            score += 30
+            reasons.append("Flagged high-risk commands (e.g. wget, curl, chmod)")
 
-    # 4. Privilege escalation attempts
-    if metrics["priv_esc_detected"]:
-        score += 25
-        reasons.append("Privilege escalation attempts (e.g. su, sudo, or root login)")
+        # 4. Privilege escalation attempts
+        if metrics["priv_esc_detected"]:
+            score += 25
+            reasons.append("Privilege escalation attempts (e.g. su, sudo, or root login)")
 
-    # 5. Sensitive file access patterns
-    if metrics["file_access_detected"]:
-        score += 20
-        reasons.append("Suspicious file/directory access patterns (e.g. /etc/passwd, .env)")
+        # 5. Sensitive file access patterns
+        if metrics["file_access_detected"]:
+            score += 20
+            reasons.append("Suspicious file/directory access patterns (e.g. /etc/passwd, .env)")
 
-    # Cap score at 100
-    score = min(score, 100)
+        # Cap score at 100
+        score = min(score, 100)
 
-    # Risk level classification
-    if score >= 70:
-        level = "CRITICAL"
-    elif score >= 30:
-        level = "MEDIUM"
-    else:
-        level = "LOW"
+        # Risk level classification
+        if score >= 70:
+            level = "CRITICAL"
+        elif score >= 30:
+            level = "MEDIUM"
+        else:
+            level = "LOW"
 
-    # Compile attack categories
-    categories = []
-    if metrics.get("cryptominer_detected"):
-        categories.append("CRYPTOMINING")
-    if metrics.get("reverse_shell_detected"):
-        categories.append("REVERSE_SHELL")
-    if metrics.get("exploit_detected"):
-        categories.append("EXPLOIT")
-    if metrics.get("priv_esc_detected"):
-        categories.append("PRIVILEGE_ESCALATION")
-    if metrics.get("file_access_detected"):
-        categories.append("CREDENTIAL_ACCESS")
+        # Compile attack categories
+        categories = []
+        if metrics.get("cryptominer_detected"):
+            categories.append("CRYPTOMINING")
+        if metrics.get("reverse_shell_detected"):
+            categories.append("REVERSE_SHELL")
+        if metrics.get("exploit_detected"):
+            categories.append("EXPLOIT")
+        if metrics.get("priv_esc_detected"):
+            categories.append("PRIVILEGE_ESCALATION")
+        if metrics.get("file_access_detected"):
+            categories.append("CREDENTIAL_ACCESS")
 
-    return {
-        "threat_score": score,
-        "threat_level": level,
-        "reasons": reasons,
-        "indicators": metrics.get("matched_indicators", []),
-        "mitre_techniques": sorted(list(metrics.get("mitre_techniques", set()))),
-        "attack_categories": categories,
-    }
+        return {
+            "threat_score": score,
+            "threat_level": level,
+            "reasons": reasons,
+            "indicators": list(metrics.get("matched_indicators", [])),
+            "mitre_techniques": sorted(list(metrics.get("mitre_techniques", set()))),
+            "attack_categories": categories,
+        }
 
 
 def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -363,130 +369,144 @@ def analyze_event(event: Dict[str, Any]) -> Dict[str, Any]:
     src_ip = event.get("src_ip", "unknown")
     event_type = event.get("event_type", "")
     payload = event.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
     protocol = event.get("protocol", "")
 
-    now = time.time()
-    metrics = _ip_metrics[src_ip]
-    _last_activity[src_ip] = now
-    _events_since_prune += 1
-    if _events_since_prune >= 500:
-        _events_since_prune = 0
-        prune_metrics()
+    with _STATE_LOCK:
+        now = time.time()
+        metrics = _ip_metrics[src_ip]
+        _last_activity[src_ip] = now
+        _events_since_prune += 1
+        if _events_since_prune >= 500:
+            _events_since_prune = 0
+            prune_metrics()
 
-    # Update in-memory state
-    if event_type == "auth_attempt":
-        metrics["auth_attempts"].append(now)
-        _attack_stats["auth_attempts"] += 1
-        # Root logins are counted as privilege escalation attempts
-        if payload.get("username") == "root":
-            metrics["priv_esc_detected"] = True
-            metrics["mitre_techniques"].add("T1078")
-            _attack_stats["root_logins"] += 1
+        # Update in-memory state
+        if event_type == "auth_attempt":
+            metrics["auth_attempts"].append(now)
+            _attack_stats["auth_attempts"] += 1
+            # Root logins are counted as privilege escalation attempts
+            if payload.get("username") == "root":
+                metrics["priv_esc_detected"] = True
+                metrics["mitre_techniques"].add("T1078")
+                _attack_stats["root_logins"] += 1
 
-    elif event_type == "command" or (protocol in ("SSH", "Telnet") and "command" in payload):
-        command = str(payload.get("command", ""))[:4096]
-        metrics["commands"].append(now)
-        _attack_stats["commands"] += 1
+        elif event_type == "command" or (protocol in ("SSH", "Telnet") and "command" in payload):
+            command = str(payload.get("command", ""))[:4096]
+            metrics["commands"].append(now)
+            _attack_stats["commands"] += 1
 
-        # Match high risk commands (downloads, network tools, execution, reverse shell patterns)
-        if re.search(r"\b(wget|curl|chmod\s+(?:777|\+x)|chown|useradd|groupadd|tftp|netcat|ncat|nc|socat|iptables|systemctl|crontab|rm\s+-rf|nohup|pkill|killall)\b", command) or re.search(r"(bash\s+-i|pty\.spawn|/dev/tcp/|exec\s+5<>|socket\.socket)", command):
-            metrics["high_risk_detected"] = True
-            metrics["mitre_techniques"].add("T1059.004")
+            # Match high risk commands (downloads, network tools, execution, reverse shell patterns)
+            if re.search(r"\b(wget|curl|chmod\s+(?:777|\+x)|chown|useradd|groupadd|tftp|netcat|ncat|nc|socat|iptables|systemctl|crontab|rm\s+-rf|nohup|pkill|killall)\b", command) or re.search(r"(bash\s+-i|pty\.spawn|/dev/tcp/|exec\s+5<>|socket\.socket)", command):
+                metrics["high_risk_detected"] = True
+                metrics["mitre_techniques"].add("T1059.004")
 
-        # Match privilege escalation commands
-        if re.search(r"\b(sudo|su|pkexec|doas)\b", command):
-            metrics["priv_esc_detected"] = True
-            metrics["mitre_techniques"].add("T1548.003")
-            _attack_stats["privilege_escalations"] += 1
+            # Match privilege escalation commands
+            if re.search(r"\b(sudo|su|pkexec|doas)\b", command):
+                metrics["priv_esc_detected"] = True
+                metrics["mitre_techniques"].add("T1548.003")
+                _attack_stats["privilege_escalations"] += 1
 
-        # Match suspicious file access patterns
-        if re.search(r"(/etc/passwd|/etc/shadow|/etc/sudoers|/etc/hosts|authorized_keys|id_rsa|\.env|\.git|\.aws|\.docker|\.kube|/proc/|/dev/null)", command):
-            metrics["file_access_detected"] = True
-            metrics["mitre_techniques"].add("T1552.001")
-            _attack_stats["credential_access"] += 1
+            # Match suspicious file access patterns
+            if re.search(r"(/etc/passwd|/etc/shadow|/etc/sudoers|/etc/hosts|authorized_keys|id_rsa|\.env|\.git|\.aws|\.docker|\.kube|/proc/|/dev/null)", command):
+                metrics["file_access_detected"] = True
+                metrics["mitre_techniques"].add("T1552.001")
+                _attack_stats["credential_access"] += 1
 
-        # Detect cryptominers
-        crypto_hits = detect_cryptominer(command)
-        if crypto_hits:
-            metrics["cryptominer_detected"] = True
-            metrics["high_risk_detected"] = True
-            metrics["mitre_techniques"].add("T1496")
-            _record_indicators(metrics, crypto_hits)
-            _attack_stats["cryptomining_probes"] += 1
+            # Detect cryptominers
+            crypto_hits = detect_cryptominer(command)
+            if crypto_hits:
+                metrics["cryptominer_detected"] = True
+                metrics["high_risk_detected"] = True
+                metrics["mitre_techniques"].add("T1496")
+                _record_indicators(metrics, crypto_hits)
+                _attack_stats["cryptomining_probes"] += 1
 
-        # Detect reverse shells
-        rev_hits = detect_reverse_shell(command)
-        if rev_hits:
-            metrics["reverse_shell_detected"] = True
-            metrics["high_risk_detected"] = True
-            metrics["mitre_techniques"].add("T1059.004")
-            _record_indicators(metrics, rev_hits)
-            _attack_stats["reverse_shells"] += 1
+            # Detect reverse shells
+            rev_hits = detect_reverse_shell(command)
+            if rev_hits:
+                metrics["reverse_shell_detected"] = True
+                metrics["high_risk_detected"] = True
+                metrics["mitre_techniques"].add("T1059.004")
+                _record_indicators(metrics, rev_hits)
+                _attack_stats["reverse_shells"] += 1
 
-        # Add general MITRE tags
-        for tag in get_mitre_attack_tags(command, protocol):
-            metrics["mitre_techniques"].add(tag["technique_id"])
+            # Add general MITRE tags
+            for tag in get_mitre_attack_tags(command, protocol):
+                metrics["mitre_techniques"].add(tag["technique_id"])
 
-    elif protocol == "HTTP":
-        path = str(payload.get("path", ""))[:1024]
-        query = str(payload.get("query", ""))[:1024]
-        body_str = str(payload.get("body", ""))[:2048]
-        full_req = f"{path}?{query} {body_str}"
-        _attack_stats["http_requests"] += 1
+        elif protocol == "HTTP":
+            path = str(payload.get("path", ""))[:1024]
+            query = str(payload.get("query", ""))[:1024]
+            body_str = str(payload.get("body", ""))[:2048]
+            full_req = f"{path}?{query} {body_str}"
+            _attack_stats["http_requests"] += 1
 
-        # Match sensitive path probes
-        if re.search(r"(\.env|\.git|\.aws|\.docker|\.kube|/admin|/wp-admin|/wp-login|/etc/passwd|/etc/shadow|/actuator|/console)", path):
-            metrics["file_access_detected"] = True
-            metrics["mitre_techniques"].add("T1552.001")
-            _attack_stats["credential_probes"] += 1
+            # Match sensitive path probes
+            if re.search(r"(\.env|\.git|\.aws|\.docker|\.kube|/admin|/wp-admin|/wp-login|/etc/passwd|/etc/shadow|/actuator|/console)", path):
+                metrics["file_access_detected"] = True
+                metrics["mitre_techniques"].add("T1552.001")
+                _attack_stats["credential_probes"] += 1
 
-        # Match web attack patterns (SQLi, XSS, Path Traversal, Command Injection)
-        if re.search(r"(union\s+select|select\s+.*from|' OR '1'='1|<script>|\.\./\.\./|;\s*cat\s+|;\s*wget|;\s*curl)", full_req, re.IGNORECASE):
-            metrics["high_risk_detected"] = True
-            metrics["mitre_techniques"].add("T1190")
-            _attack_stats["web_exploits"] += 1
+            # Match web attack patterns (SQLi, XSS, Path Traversal, Command Injection)
+            if re.search(r"(union\s+select|select\s+.*from|' OR '1'='1|<script>|\.\./\.\./|;\s*cat\s+|;\s*wget|;\s*curl)", full_req, re.IGNORECASE):
+                metrics["high_risk_detected"] = True
+                metrics["mitre_techniques"].add("T1190")
+                _attack_stats["web_exploits"] += 1
 
-        # Additional rich exploit detection
-        exploit_hits = detect_web_exploit(path, query, body_str)
-        if exploit_hits:
-            metrics["exploit_detected"] = True
-            metrics["high_risk_detected"] = True
-            metrics["mitre_techniques"].add("T1190")
-            _record_indicators(metrics, exploit_hits)
-            _attack_stats["web_exploits"] += 1
+            # Additional rich exploit detection
+            exploit_hits = detect_web_exploit(path, query, body_str)
+            if exploit_hits:
+                metrics["exploit_detected"] = True
+                metrics["high_risk_detected"] = True
+                metrics["mitre_techniques"].add("T1190")
+                _record_indicators(metrics, exploit_hits)
+                _attack_stats["web_exploits"] += 1
 
-        for tag in get_mitre_attack_tags(full_req, "HTTP"):
-            metrics["mitre_techniques"].add(tag["technique_id"])
+            for tag in get_mitre_attack_tags(full_req, "HTTP"):
+                metrics["mitre_techniques"].add(tag["technique_id"])
 
-    # Calculate and return updated threat stats
-    return get_threat_score(src_ip)
+        # Calculate and return updated threat stats
+        return get_threat_score(src_ip)
+
+
+def rehydrate_from_events(events: List[Dict[str, Any]]) -> int:
+    """Replay historical events into the anomaly tracker (e.g. on startup)."""
+    if not events:
+        return 0
+    with _STATE_LOCK:
+        reset_metrics()
+        for ev in events:
+            analyze_event(ev)
+        return len(events)
 
 
 def get_attack_summary() -> Dict[str, Any]:
     """Return aggregated telemetry across all detected attack vectors."""
-    now = time.time()
-    active_threats = sum(1 for m in _ip_metrics.values() if m["high_risk_detected"] or m["priv_esc_detected"])
-    total_ips = len(_ip_metrics)
+    with _STATE_LOCK:
+        active_threats = sum(1 for m in _ip_metrics.values() if m["high_risk_detected"] or m["priv_esc_detected"])
+        total_ips = len(_ip_metrics)
 
-    # Collect technique frequency
-    technique_counts: Dict[str, int] = defaultdict(int)
-    for m in _ip_metrics.values():
-        for tech in m.get("mitre_techniques", set()):
-            technique_counts[tech] += 1
+        # Collect technique frequency
+        technique_counts: Dict[str, int] = defaultdict(int)
+        for m in _ip_metrics.values():
+            for tech in m.get("mitre_techniques", set()):
+                technique_counts[tech] += 1
 
-    top_techniques = [
-        {
-            "technique_id": tech_id,
-            "name": MITRE_TECHNIQUES.get(tech_id, {}).get("name", "Unknown"),
-            "tactic": MITRE_TECHNIQUES.get(tech_id, {}).get("tactic", "Unknown"),
-            "count": count,
+        top_techniques = [
+            {
+                "technique_id": tech_id,
+                "name": MITRE_TECHNIQUES.get(tech_id, {}).get("name", "Unknown"),
+                "tactic": MITRE_TECHNIQUES.get(tech_id, {}).get("tactic", "Unknown"),
+                "count": count,
+            }
+            for tech_id, count in sorted(technique_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        ]
+
+        return {
+            "active_threats": active_threats,
+            "total_tracked_ips": total_ips,
+            "stats": dict(_attack_stats),
+            "top_mitre_techniques": top_techniques,
         }
-        for tech_id, count in sorted(technique_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    ]
-
-    return {
-        "active_threats": active_threats,
-        "total_tracked_ips": total_ips,
-        "stats": dict(_attack_stats),
-        "top_mitre_techniques": top_techniques,
-    }

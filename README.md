@@ -33,11 +33,11 @@
   - **Threat Score Indicators** (🔴 HIGH / 🟡 MED / 🟢 LOW per attacker)
   - **24-Hour Event Timeline** chart
   - **Protocol Split** donut chart
-  - **Real-time event stream** with pause/resume **and threat-level filter chips** (new in v2.3)
+  - **Real-time event stream** with pause/resume, **protocol & threat-level filter chips**, and live text search
   - **MITRE ATT&CK technique panel** with live attack-category counters (new in v2.3)
   - **Export menu** — CSV / JSON / CEF / ECS / IOC feed (new in v2.3)
   - **Session transcript modal** with per-command exit codes (new in v2.3)
-  - **IP Block/Unblock controls** — one click blocks an IP and terminates their sessions; blocks persist across restarts
+  - **IP Block/Unblock controls** — manual IP block bar, removable blocked-IP chip list, and one-click session termination; blocks persist across restarts
   - **Top Offending IPs, Top Passwords, Top HTTP Paths** leaderboards
   - **Active Intruder Controller** — live session view with BOOT/BLOCK/MAP buttons
 - **🔐 Dashboard Authentication:** Login-protected dashboard with bcrypt-hashed credentials, constant-time credential verification, JWT session tokens with `jti`-based **logout revocation** (new in v2.3 — stolen or leftover tokens die immediately), and brute-force protection on failed logins.
@@ -259,6 +259,7 @@ Scores are displayed per-session on the dashboard and included in webhook notifi
 | `GET /api/ioc?format=json\|csv\|txt\|stix` | Yes | Indicator-of-Compromise feed (malicious IPs, credentials, probed paths, STIX 2.1) |
 | `GET /metrics` | Yes | v2.3: Prometheus metrics scrape endpoint |
 | `GET /api/stats` | Yes | Aggregate stats: totals, protocol splits, top IPs, passwords, HTTP paths, hourly timeline, blocked IPs |
+| `GET /api/system` | Yes | Safe runtime metadata for dashboard header (version, ports, database type, hostname) |
 | `GET /api/sessions` | Yes | Active SSH/Telnet sessions with GeoIP data |
 | `GET /api/sessions/{id}/transcript` | Yes | v2.3: full per-command session transcript with exit codes |
 | `POST /api/sessions/{id}/kill` | Yes | Terminate an SSH session |

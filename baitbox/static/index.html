@@ -33,8 +33,8 @@
       --border-bright: rgba(30, 80, 160, 0.6);
 
       --text-primary:  #e8f0fe;
-      --text-secondary:#8ba3c9;
-      --text-muted:    #4a6080;
+      --text-secondary:#9cb3d6;
+      --text-muted:    #7590b8;
 
       --green:   #00f5a0;
       --green-d: rgba(0, 245, 160, 0.1);
@@ -57,6 +57,11 @@
        RESET & BASE
     ═══════════════════════════════════════════════════════════════════════ */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
 
     html { scroll-behavior: smooth; }
 
@@ -84,7 +89,11 @@
       display: grid;
       grid-template-rows: auto 1fr auto;
       min-height: 100vh;
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
     }
+    .layout > * { min-width: 0; }
 
     /* ═══════════════════════════════════════════════════════════════════════
        HEADER
@@ -204,7 +213,9 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 16px;
+      min-width: 0;
     }
+    .stat-grid > * { min-width: 0; }
 
     .stat-card {
       position: relative;
@@ -249,11 +260,15 @@
     }
     .stat-value {
       font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
       font-size: 34px;
       font-weight: 700;
       color: var(--accent, var(--green));
       line-height: 1;
       text-shadow: 0 0 20px var(--accent, var(--green));
+    }
+    .ev-time, .lb-count, .mitre-count, .tx-idx, .tx-time {
+      font-variant-numeric: tabular-nums;
     }
     .stat-sub {
       font-size: 11px;
@@ -280,6 +295,8 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       overflow: hidden;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .panel-header {
@@ -336,15 +353,16 @@
     ═══════════════════════════════════════════════════════════════════════ */
     .main-grid {
       display: grid;
-      grid-template-columns: 1fr 340px;
+      grid-template-columns: minmax(0, 1fr) 340px;
       gap: 24px;
+      min-width: 0;
     }
     @media (max-width: 1100px) {
-      .main-grid { grid-template-columns: 1fr; }
+      .main-grid { grid-template-columns: minmax(0, 1fr); }
     }
 
-    .left-col { display: flex; flex-direction: column; gap: 24px; }
-    .right-col { display: flex; flex-direction: column; gap: 24px; }
+    .left-col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+    .right-col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 
     /* ═══════════════════════════════════════════════════════════════════════
        MAP
@@ -384,7 +402,7 @@
     /* ═══════════════════════════════════════════════════════════════════════
        TIMELINE CHART
     ═══════════════════════════════════════════════════════════════════════ */
-    .chart-wrap { height: 160px; position: relative; }
+    .chart-wrap { height: 160px; position: relative; min-width: 0; width: 100%; }
 
     /* ═══════════════════════════════════════════════════════════════════════
        EVENT FEED (Terminal)
@@ -625,7 +643,7 @@
     /* ═══════════════════════════════════════════════════════════════════════
        PROTOCOL CHART
     ═══════════════════════════════════════════════════════════════════════ */
-    .donut-wrap { height: 200px; display: flex; align-items: center; justify-content: center; }
+    .donut-wrap { height: 200px; position: relative; min-width: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
 
     /* ═══════════════════════════════════════════════════════════════════════
        TOAST
@@ -656,13 +674,44 @@
     .toast.error { border-color: rgba(255,77,77,0.5); color: var(--red); }
 
     /* ═══════════════════════════════════════════════════════════════════════
-       FEED FILTER CHIPS (v2.3)
+       FEED FILTER CHIPS & SEARCH & BLOCK FORM
     ═══════════════════════════════════════════════════════════════════════ */
+    .feed-toolbar {
+      padding: 10px 14px 4px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
     .filter-chips {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
+      align-items: center;
     }
+    .filter-sep {
+      width: 1px;
+      height: 16px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+    .feed-search {
+      background: rgba(3, 8, 19, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-primary);
+      min-width: 190px;
+      flex: 1 1 190px;
+      max-width: 280px;
+      transition: border-color 0.2s;
+    }
+    .feed-search:focus { border-color: var(--cyan); outline: none; }
+    .feed-search::placeholder { color: var(--text-muted); }
+
     .chip {
       font-family: var(--font-mono);
       font-size: 9px;
@@ -685,6 +734,73 @@
     .chip.active.all   { border-color: var(--green); background: var(--green-d); color: var(--green); }
     .chip.active.crit  { border-color: var(--red);   background: var(--red-d);   color: var(--red); }
     .chip.active.med   { border-color: var(--amber); background: var(--amber-d); color: var(--amber); }
+    .chip.active.proto { border-color: var(--cyan);  background: var(--cyan-d);  color: var(--cyan); }
+
+    .manual-block-form {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .manual-block-input {
+      flex: 1;
+      min-width: 0;
+      background: rgba(3, 8, 19, 0.9);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-primary);
+    }
+    .manual-block-input:focus { border-color: var(--red); outline: none; }
+    .manual-block-input::placeholder { color: var(--text-muted); }
+    .blocked-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .blocked-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      background: rgba(255, 77, 77, 0.08);
+      border: 1px solid rgba(255, 77, 77, 0.3);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--red);
+    }
+    .blocked-chip button {
+      background: transparent;
+      border: none;
+      color: var(--green);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 0 2px;
+    }
+    .blocked-chip button:hover { color: #fff; }
+
+    @media (max-width: 640px) {
+      header { padding: 12px 14px; }
+      .header-right { width: 100%; gap: 6px; }
+      .badge, .ws-status { font-size: 9px; padding: 4px 8px; }
+      main { padding: 12px; gap: 14px; }
+      .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .stat-card { padding: 14px; }
+      .stat-value { font-size: 26px; }
+      .panel-header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+      .panel-header > div { flex-wrap: wrap; }
+      .panel-body { padding: 12px 14px; }
+      .filter-sep { display: none; }
+      .feed-search { flex: 1 1 100%; max-width: 100%; min-width: 0; }
+      .ev-body { overflow-wrap: anywhere; }
+      .session-actions { flex-wrap: wrap; }
+      .toast { right: 12px; left: 12px; max-width: none; bottom: 12px; }
+    }
 
     /* ═══════════════════════════════════════════════════════════════════════
        MITRE ATT&CK PANEL (v2.3)
@@ -878,10 +994,12 @@
     ═══════════════════════════════════════════════════════════════════════ */
     .two-col-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
+      min-width: 0;
     }
-    @media (max-width: 800px) { .two-col-grid { grid-template-columns: 1fr; } }
+    .two-col-grid > * { min-width: 0; }
+    @media (max-width: 800px) { .two-col-grid { grid-template-columns: minmax(0, 1fr); } }
 
     /* ═══════════════════════════════════════════════════════════════════════
        SECTION DIVIDER
@@ -905,12 +1023,12 @@
       <span class="logo-icon">🪤</span>
       <div class="logo-text">
         <h1>BAITBOX</h1>
-        <p>CYBER COMMAND DECOY SYSTEM v2.3</p>
+        <p id="system-subtitle">CYBER COMMAND DECOY SYSTEM v2.3</p>
       </div>
     </div>
 
     <div class="header-right">
-      <span class="badge"><span class="dot dot-purple"></span> SSH :2222</span>
+      <span class="badge" id="ssh-badge"><span class="dot dot-purple"></span> SSH :2222</span>
       <span class="badge" id="http-badge"><span class="dot dot-cyan"></span> HTTP :8000</span>
       <span class="badge" id="telnet-badge" style="display:none"><span class="dot dot-amber"></span> Telnet :2323</span>
       <span class="ws-status offline" id="ws-badge">
@@ -947,7 +1065,7 @@
         <div class="stat-icon">🎯</div>
         <div class="stat-label">Active Intruders</div>
         <div class="stat-value" id="stat-sessions">0</div>
-        <div class="stat-sub">live SSH sessions</div>
+        <div class="stat-sub">live SSH / Telnet</div>
       </div>
       <div class="stat-card purple">
         <div class="stat-watermark">03</div>
@@ -1040,13 +1158,19 @@
               <button class="btn" id="pause-btn" onclick="togglePause()" title="Pause/resume feed (P)">PAUSE</button>
             </div>
           </div>
-          <div style="padding:10px 14px 0">
+          <div class="feed-toolbar">
             <div class="filter-chips" id="feed-filters">
               <button class="chip active all" data-filter="ALL" onclick="setFeedFilter('ALL', this)">ALL</button>
               <button class="chip" data-filter="CRITICAL" onclick="setFeedFilter('CRITICAL', this)">🔴 CRITICAL</button>
               <button class="chip" data-filter="MEDIUM" onclick="setFeedFilter('MEDIUM', this)">🟡 MEDIUM</button>
               <button class="chip" data-filter="LOW" onclick="setFeedFilter('LOW', this)">🟢 LOW</button>
+              <span class="filter-sep" aria-hidden="true"></span>
+              <button class="chip active proto" data-proto="ALL" onclick="setProtoFilter('ALL', this)">ALL PROTO</button>
+              <button class="chip" data-proto="SSH" onclick="setProtoFilter('SSH', this)">SSH</button>
+              <button class="chip" data-proto="HTTP" onclick="setProtoFilter('HTTP', this)">HTTP</button>
+              <button class="chip" data-proto="Telnet" onclick="setProtoFilter('Telnet', this)">TELNET</button>
             </div>
+            <input type="search" id="feed-search" class="feed-search" placeholder="Search IP, cmd, path..." aria-label="Search attack stream" oninput="setFeedSearch(this.value)">
           </div>
           <div class="terminal" id="feed"></div>
         </div>
@@ -1067,18 +1191,23 @@
           </div>
           <div class="panel-body">
             <div class="sessions-list" id="sessions-list">
-              <p style="text-align:center;color:var(--text-muted);font-family:var(--font-mono);font-size:11px;padding:20px 0">No active SSH connections</p>
+              <p style="text-align:center;color:var(--text-muted);font-family:var(--font-mono);font-size:11px;padding:20px 0">No active SSH / Telnet connections</p>
             </div>
           </div>
         </div>
 
-        <!-- Top IPs -->
+        <!-- Top IPs & Blocklist -->
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title"><span class="indicator" style="background:var(--red)"></span>TOP OFFENDING IPs</div>
           </div>
           <div class="panel-body">
+            <form class="manual-block-form" onsubmit="handleManualBlock(event)">
+              <input type="text" id="manual-block-ip" class="manual-block-input" placeholder="Block IP (e.g. 203.0.113.50)" aria-label="IP address to block" autocomplete="off">
+              <button type="submit" class="btn btn-red">BLOCK</button>
+            </form>
             <div class="leaderboard" id="top-ips"></div>
+            <div class="blocked-chips" id="blocked-chips"></div>
           </div>
         </div>
 
@@ -1124,7 +1253,7 @@
     </div><!-- /main-grid -->
   </main>
 
-  <footer>BaitBox Honeypot System v2.3 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/qylen/baitbox" style="color:var(--green);text-decoration:none">GitHub</a></footer>
+  <footer>BaitBox Honeypot System v2.3 — For authorized security research only. &nbsp;·&nbsp; <a href="https://github.com/e-1-s-4/baitbox" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">GitHub</a></footer>
 
 </div><!-- /layout -->
 
@@ -1159,6 +1288,7 @@
    STATE
 ═══════════════════════════════════════════════════════════════════════════ */
 let events = [];
+let seenEventIds = new Set();
 let sessions = [];
 let stats = {};
 let blockedIps = new Set();
@@ -1169,9 +1299,11 @@ let map = null;
 let mapMarkers = {};   // key -> L.circleMarker
 let timelineChart = null;
 let protoChart = null;
-let geoCache = {};     // ip -> {lat,lon,city,country,countryCode,threat_score}
-let serverTotalEvents = null;  // authoritative total from /api/stats
-let feedFilter = 'ALL';        // v2.3: live-feed threat-level filter
+let geoCache = {};     // ip -> {lat,lon,city,country,countryCode,threat_score,is_private}
+let serverCounts = { total: null, auth: null, cmds: null, ssh: null, http: null, telnet: null };
+let feedFilter = 'ALL';        // threat-level filter
+let protoFilter = 'ALL';       // protocol filter
+let feedSearch = '';           // text search filter
 const MAX_EVENTS = 300;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1180,6 +1312,7 @@ const MAX_EVENTS = 300;
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
   initCharts();
+  fetchSystemInfo();
   loadInitialData();
   connectWS();
   fetchAttackSummary();
@@ -1188,7 +1321,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const httpBadge = document.getElementById('http-badge');
   if (httpBadge) {
     const port = location.port || (location.protocol === 'https:' ? '443' : '80');
-    httpBadge.innerHTML = `<span class="dot dot-cyan"></span> HTTP :${port}`;
+    httpBadge.innerHTML = `<span class="dot dot-cyan"></span> HTTP :${escHtml(port)}`;
   }
   document.addEventListener('click', (e) => {
     const menu = document.getElementById('export-menu');
@@ -1204,6 +1337,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') closeTranscript();
   });
 });
+
+async function fetchSystemInfo() {
+  try {
+    const res = await fetch('/api/system');
+    if (!res.ok) return;
+    const sys = await res.json();
+    const sshBadge = document.getElementById('ssh-badge');
+    if (sshBadge && sys.ssh_port) {
+      sshBadge.innerHTML = `<span class="dot dot-purple"></span> SSH :${Number(sys.ssh_port)}`;
+    }
+    const telnetBadge = document.getElementById('telnet-badge');
+    if (telnetBadge && sys.telnet_enabled) {
+      telnetBadge.innerHTML = `<span class="dot dot-amber"></span> Telnet :${Number(sys.telnet_port || 2323)}`;
+      telnetBadge.style.display = '';
+    }
+    const subtitle = document.getElementById('system-subtitle');
+    if (subtitle && sys.version) {
+      const dbTag = sys.database_type ? ` · ${String(sys.database_type).toUpperCase()}` : '';
+      const hostTag = sys.ssh_banner_hostname ? ` · ${sys.ssh_banner_hostname}` : '';
+      subtitle.textContent = `CYBER COMMAND DECOY SYSTEM v${sys.version}${hostTag}${dbTag}`;
+    }
+  } catch (e) {}
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    MAP
@@ -1224,7 +1380,7 @@ function initMap() {
 async function geocodeIP(ip) {
   if (geoCache[ip]) return geoCache[ip];
   try {
-    const res = await fetch(`/api/geoip/${ip}`);
+    const res = await fetch(`/api/geoip/${encodeURIComponent(ip)}`);
     const data = await res.json();
     if (data && !data.error) {
       geoCache[ip] = data;
@@ -1234,9 +1390,18 @@ async function geocodeIP(ip) {
   return null;
 }
 
+function hasValidGeoCoords(geo) {
+  return Boolean(
+    geo &&
+    !geo.is_private &&
+    typeof geo.lat === 'number' && Number.isFinite(geo.lat) &&
+    typeof geo.lon === 'number' && Number.isFinite(geo.lon)
+  );
+}
+
 async function addToMap(ip, knownGeo = null) {
   const geo = knownGeo || await geocodeIP(ip);
-  if (!geo || !geo.lat || !geo.lon) return;
+  if (!hasValidGeoCoords(geo)) return geo;
   const key = `${geo.lat.toFixed(2)}_${geo.lon.toFixed(2)}`;
   if (mapMarkers[key]) {
     mapMarkers[key]._hitCount = (mapMarkers[key]._hitCount || 1) + 1;
@@ -1254,7 +1419,7 @@ async function addToMap(ip, knownGeo = null) {
   }).addTo(map);
   marker._hitCount = 1;
   marker.bindPopup(
-    `<b style="color:#ff4d4d">${escHtml(safeIp(ip))}</b><br><span style="color:#8ba3c9">${escHtml(geo.city)}, ${escHtml(geo.country)}</span><br>` +
+    `<b style="color:#ff4d4d">${escHtml(safeIp(ip))}</b><br><span style="color:#8ba3c9">${escHtml(geo.city || 'Unknown')}, ${escHtml(geo.country || 'Unknown')}</span><br>` +
     `<span style="color:#ffb347">Threat: ${Number(geo.threat_score) || 0}%</span>`,
     { className: 'baitbox-popup' }
   );
@@ -1264,11 +1429,15 @@ async function addToMap(ip, knownGeo = null) {
 
 async function centerMapOnIP(ip) {
   const geo = await geocodeIP(ip);
-  if (!geo) { showToast('No GeoIP data for ' + ip, true); return; }
+  if (!hasValidGeoCoords(geo)) {
+    const label = geo && geo.is_private ? 'Private / local network' : 'No GeoIP coordinates';
+    showToast(`📍 ${ip} — ${label}`);
+    return;
+  }
   map.flyTo([geo.lat, geo.lon], 7, { duration: 1 });
   const key = `${geo.lat.toFixed(2)}_${geo.lon.toFixed(2)}`;
   if (mapMarkers[key]) mapMarkers[key].openPopup();
-  showToast(`📍 ${ip} → ${geo.city}, ${geo.country}`);
+  showToast(`📍 ${ip} → ${geo.city || 'Unknown'}, ${geo.country || 'Unknown'}`);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1276,7 +1445,7 @@ async function centerMapOnIP(ip) {
 ═══════════════════════════════════════════════════════════════════════════ */
 function initCharts() {
   const gridColor = 'rgba(30,80,160,0.15)';
-  const textColor = '#4a6080';
+  const textColor = '#7590b8';
 
   // Timeline
   const tCtx = document.getElementById('timeline-chart').getContext('2d');
@@ -1299,7 +1468,7 @@ function initCharts() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: { duration: 400 },
+      animation: false,
       scales: {
         x: {
           grid: { color: gridColor },
@@ -1307,7 +1476,7 @@ function initCharts() {
         },
         y: {
           grid: { color: gridColor },
-          ticks: { color: textColor, font: { family: 'JetBrains Mono', size: 9 }, stepSize: 1 },
+          ticks: { color: textColor, font: { family: 'JetBrains Mono', size: 9 }, precision: 0 },
           beginAtZero: true,
         }
       },
@@ -1332,6 +1501,7 @@ function initCharts() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      animation: false,
       cutout: '65%',
       plugins: {
         legend: {
@@ -1349,21 +1519,42 @@ function initCharts() {
 }
 
 function updateTimeline(hourly) {
-  if (!hourly || !hourly.length) return;
-  const labels = hourly.map(h => {
-    const d = new Date(h.hour);
+  if (!hourly || !hourly.length) {
+    timelineChart.data.labels = [];
+    timelineChart.data.datasets[0].data = [];
+    timelineChart.stop();
+    timelineChart.update('none');
+    return;
+  }
+  const rows = hourly.slice();
+  if (rows.length === 1) {
+    const firstRaw = String(rows[0].hour || '');
+    const norm = firstRaw.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(firstRaw) ? firstRaw : `${firstRaw}Z`;
+    const firstDate = new Date(norm);
+    if (!Number.isNaN(firstDate.getTime())) {
+      const prevDate = new Date(firstDate.getTime() - 3600 * 1000);
+      rows.unshift({ hour: prevDate.toISOString(), count: 0 });
+    }
+  }
+  const labels = rows.map(h => {
+    const raw = String(h.hour || '');
+    const normalized = raw.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw}Z`;
+    const d = new Date(normalized);
+    if (Number.isNaN(d.getTime())) return raw.slice(11, 16) || raw;
     return `${d.getHours().toString().padStart(2,'0')}:00`;
   });
   timelineChart.data.labels = labels;
-  timelineChart.data.datasets[0].data = hourly.map(h => h.count);
+  timelineChart.data.datasets[0].data = rows.map(h => h.count);
+  timelineChart.stop();
   timelineChart.update('none');
 }
 
 function updateProtoChart() {
-  const ssh = events.filter(e => e.protocol === 'SSH').length;
-  const http = events.filter(e => e.protocol === 'HTTP').length;
-  const telnet = events.filter(e => e.protocol === 'Telnet').length;
+  const ssh = serverCounts.ssh !== null ? serverCounts.ssh : events.filter(e => e.protocol === 'SSH').length;
+  const http = serverCounts.http !== null ? serverCounts.http : events.filter(e => e.protocol === 'HTTP').length;
+  const telnet = serverCounts.telnet !== null ? serverCounts.telnet : events.filter(e => e.protocol === 'Telnet').length;
   protoChart.data.datasets[0].data = [ssh, http, telnet];
+  protoChart.stop();
   protoChart.update('none');
 }
 
@@ -1374,18 +1565,38 @@ async function loadInitialData() {
   await Promise.all([fetchEvents(), fetchSessions(), fetchStats()]);
 }
 
+function registerEvent(ev, pushToTail = true) {
+  if (!ev) return false;
+  if (ev.id !== undefined && ev.id !== null) {
+    if (seenEventIds.has(ev.id)) return false;
+    seenEventIds.add(ev.id);
+    if (seenEventIds.size > MAX_EVENTS * 4) {
+      const oldest = seenEventIds.values().next().value;
+      seenEventIds.delete(oldest);
+    }
+  }
+  if (pushToTail) {
+    events.push(ev);
+    if (events.length > MAX_EVENTS) events.shift();
+  }
+  return true;
+}
+
 async function fetchEvents() {
   try {
     const res = await fetch('/api/events?limit=200');
     const data = await res.json();
-    events = data;
+    events = [];
+    seenEventIds.clear();
+    for (const ev of data) {
+      registerEvent(ev, true);
+      if (ev.geo) geoCache[ev.src_ip] = ev.geo;
+    }
     renderFeed();
     updateProtoChart();
     updateStatCards();
-    // Map all events
     for (const ev of data.slice(-30)) {
-      addToMap(ev.src_ip);
-      if (ev.geo) geoCache[ev.src_ip] = ev.geo;
+      addToMap(ev.src_ip, ev.geo || null);
     }
   } catch (e) { console.error('fetchEvents', e); }
 }
@@ -1413,24 +1624,35 @@ async function fetchStats() {
     updateTimeline(stats.hourly_events || []);
     blockedIps = new Set(stats.blocked_ips || []);
     document.getElementById('stat-blocked').textContent = blockedIps.size;
+    renderBlockedChips();
+
     if (stats.total_events !== undefined) {
-      serverTotalEvents = stats.total_events;
-      document.getElementById('stat-total').textContent = stats.total_events;
+      serverCounts.total = Number(stats.total_events) || 0;
+      const byType = new Map((stats.by_event_type || []).map(r => [r.event_type, Number(r.count) || 0]));
+      const byProto = new Map((stats.by_protocol || []).map(r => [r.protocol, Number(r.count) || 0]));
+      serverCounts.auth = byType.get('auth_attempt') || 0;
+      serverCounts.cmds = byType.get('command') || 0;
+      serverCounts.ssh = byProto.get('SSH') || 0;
+      serverCounts.http = byProto.get('HTTP') || 0;
+      serverCounts.telnet = byProto.get('Telnet') || 0;
+      updateStatCards();
+      updateProtoChart();
     }
-    // Check if telnet data exists
-    const hasTelnet = (stats.by_protocol || []).some(p => p.protocol === 'Telnet');
-    if (hasTelnet) document.getElementById('telnet-badge').style.display = '';
+    if ((serverCounts.telnet || 0) > 0) {
+      document.getElementById('telnet-badge').style.display = '';
+    }
   } catch (e) {}
 }
 
 function updateStatCards() {
-  if (serverTotalEvents !== null)
-    document.getElementById('stat-total').textContent = serverTotalEvents;
-  else
-    document.getElementById('stat-total').textContent = events.length;
-  document.getElementById('stat-auth').textContent = events.filter(e => e.event_type === 'auth_attempt').length;
-  document.getElementById('stat-cmds').textContent = events.filter(e => e.event_type === 'command').length;
-  document.getElementById('stat-http').textContent = events.filter(e => e.protocol === 'HTTP').length;
+  document.getElementById('stat-total').textContent =
+    serverCounts.total !== null ? serverCounts.total : events.length;
+  document.getElementById('stat-auth').textContent =
+    serverCounts.auth !== null ? serverCounts.auth : events.filter(e => e.event_type === 'auth_attempt').length;
+  document.getElementById('stat-cmds').textContent =
+    serverCounts.cmds !== null ? serverCounts.cmds : events.filter(e => e.event_type === 'command').length;
+  document.getElementById('stat-http').textContent =
+    serverCounts.http !== null ? serverCounts.http : events.filter(e => e.protocol === 'HTTP').length;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1449,19 +1671,26 @@ function connectWS() {
 
   ws.onmessage = ({ data }) => {
     const ev = JSON.parse(data);
+    if (!registerEvent(ev, true)) return;
+
     if (ev.geo) geoCache[ev.src_ip] = ev.geo;
     addToMap(ev.src_ip, ev.geo || null);
 
-    events.push(ev);
-    if (events.length > MAX_EVENTS) events.shift();
-    if (serverTotalEvents !== null) serverTotalEvents += 1;
+    if (serverCounts.total !== null) {
+      serverCounts.total += 1;
+      if (ev.event_type === 'auth_attempt' && serverCounts.auth !== null) serverCounts.auth += 1;
+      if (ev.event_type === 'command' && serverCounts.cmds !== null) serverCounts.cmds += 1;
+      if (ev.protocol === 'SSH' && serverCounts.ssh !== null) serverCounts.ssh += 1;
+      if (ev.protocol === 'HTTP' && serverCounts.http !== null) serverCounts.http += 1;
+      if (ev.protocol === 'Telnet' && serverCounts.telnet !== null) serverCounts.telnet += 1;
+    }
 
     if (!paused) appendEventRow(ev);
 
     updateStatCards();
     updateProtoChart();
+    fetchAttackSummary();
 
-    // Refresh sessions on SSH auth/command
     if (ev.protocol === 'SSH' || ev.protocol === 'Telnet') fetchSessions();
   };
 }
@@ -1479,22 +1708,23 @@ function setWSStatus(online) {
 function renderFeed() {
   const feed = document.getElementById('feed');
   feed.innerHTML = '';
-  const recent = events.slice(-100).reverse().filter(eventMatchesFilter);
+  const recent = events.slice(-150).reverse().filter(eventMatchesFilter);
   if (!recent.length) {
-    feed.innerHTML = `<div class="empty-state"><span class="empty-icon">🎣</span><span class="empty-text">Awaiting decoy triggers. Bait is set.</span></div>`;
+    const msg = events.length
+      ? 'No events match active filters.'
+      : 'Awaiting decoy triggers. Bait is set.';
+    feed.innerHTML = `<div class="empty-state"><span class="empty-icon">🎣</span><span class="empty-text">${msg}</span></div>`;
     return;
   }
   recent.forEach(ev => feed.appendChild(buildEventRow(ev)));
 }
 
 function appendEventRow(ev) {
-  if (!eventMatchesFilter(ev)) return;   // v2.3: respect active threat filter
+  if (!eventMatchesFilter(ev)) return;
   const feed = document.getElementById('feed');
-  // Remove empty state if present
   const empty = feed.querySelector('.empty-state');
   if (empty) empty.remove();
-  // Remove oldest row if too many
-  while (feed.children.length > 120) feed.removeChild(feed.lastChild);
+  while (feed.children.length > 150) feed.removeChild(feed.lastChild);
   feed.prepend(buildEventRow(ev));
 }
 
@@ -1502,7 +1732,7 @@ function buildEventRow(ev) {
   const div = document.createElement('div');
   div.className = 'event-row';
 
-  const geo = geoCache[ev.src_ip];
+  const geo = ev.geo || geoCache[ev.src_ip];
   const country = geo ? `${geo.city ? escHtml(geo.city) + ', ' : ''}${escHtml(geo.countryCode || '')}` : '';
 
   let threat = 0;
@@ -1523,7 +1753,6 @@ function buildEventRow(ev) {
       threatClass = 'threat-low';
     }
   } else {
-    // Fallback to GeoIP threat score
     const geoThreat = (geo && geo.threat_score) ? geo.threat_score : 0;
     threat = geoThreat;
     if (geoThreat >= 60) {
@@ -1552,16 +1781,22 @@ function buildEventRow(ev) {
   return div;
 }
 
-function clearFeed() { events = []; renderFeed(); updateProtoChart(); updateStatCards(); }
+function clearFeed() {
+  events = [];
+  seenEventIds.clear();
+  renderFeed();
+  showToast('🧹 Feed view cleared');
+}
+
 function togglePause() {
   paused = !paused;
   document.getElementById('pause-btn').textContent = paused ? 'RESUME' : 'PAUSE';
 }
 
-/* ── v2.3: feed threat-level filtering ─────────────────────────────────── */
+/* ── feed filtering & search ────────────────────────────────────────────── */
 function setFeedFilter(level, chipEl) {
   feedFilter = level;
-  document.querySelectorAll('#feed-filters .chip').forEach(c => c.classList.remove('active', 'all', 'crit', 'med'));
+  document.querySelectorAll('#feed-filters .chip[data-filter]').forEach(c => c.classList.remove('active', 'all', 'crit', 'med'));
   chipEl.classList.add('active');
   if (level === 'ALL') chipEl.classList.add('all');
   if (level === 'CRITICAL') chipEl.classList.add('crit');
@@ -1569,10 +1804,37 @@ function setFeedFilter(level, chipEl) {
   renderFeed();
 }
 
+function setProtoFilter(proto, chipEl) {
+  protoFilter = proto;
+  document.querySelectorAll('#feed-filters .chip[data-proto]').forEach(c => c.classList.remove('active', 'proto'));
+  chipEl.classList.add('active', 'proto');
+  renderFeed();
+}
+
+function setFeedSearch(query) {
+  feedSearch = String(query || '').trim().toLowerCase();
+  renderFeed();
+}
+
 function eventMatchesFilter(ev) {
-  if (feedFilter === 'ALL') return true;
-  const level = ev.threat_level || 'LOW';
-  return level === feedFilter;
+  if (feedFilter !== 'ALL') {
+    const level = ev.threat_level || 'LOW';
+    if (level !== feedFilter) return false;
+  }
+  if (protoFilter !== 'ALL') {
+    if ((ev.protocol || '') !== protoFilter) return false;
+  }
+  if (feedSearch) {
+    const haystack = [
+      ev.src_ip || '',
+      ev.protocol || '',
+      ev.event_type || '',
+      ev.threat_level || '',
+      formatPayload(ev),
+    ].join(' ').toLowerCase();
+    if (!haystack.includes(feedSearch)) return false;
+  }
+  return true;
 }
 
 function toggleExportMenu(event) {
@@ -1631,11 +1893,9 @@ async function triggerSim(scenario) {
     const data = await res.json();
     if (data && data.status === 'ok') {
       showToast(`🎯 Injected ${data.events_generated} intrusion events`);
-      await fetchStats();
-      await fetchEvents();
-      await fetchAttackSummary();
+      await Promise.all([fetchStats(), fetchEvents(), fetchAttackSummary()]);
     } else {
-      showToast('Simulation failed', true);
+      showToast((data && data.message) || 'Simulation failed', true);
     }
   } catch (err) {
     showToast('Simulation error', true);
@@ -1656,13 +1916,13 @@ function renderAttackSummary(summary) {
   const catsEl = document.getElementById('attack-cats');
   if (!listEl || !catsEl) return;
 
-  const stats = (summary && summary.stats) || {};
+  const summaryStats = (summary && summary.stats) || {};
   const cats = [
-    ['🌐 Web exploits', stats.web_exploits || 0],
-    ['⛏️ Cryptomining', stats.cryptomining_probes || 0],
-    ['🐚 Reverse shells', stats.reverse_shells || 0],
-    ['⬆️ Priv-esc', stats.privilege_escalations || 0],
-    ['🔑 Credential access', stats.credential_access || 0],
+    ['🌐 Web exploits', summaryStats.web_exploits || 0],
+    ['⛏️ Cryptomining', summaryStats.cryptomining_probes || 0],
+    ['🐚 Reverse shells', summaryStats.reverse_shells || 0],
+    ['⬆️ Priv-esc', summaryStats.privilege_escalations || 0],
+    ['🔑 Credential access', summaryStats.credential_access || 0],
   ];
   catsEl.innerHTML = cats.map(([label, count]) =>
     `<span class="cat-badge ${count > 0 ? 'hit' : ''}">${label} <b>${count}</b></span>`
@@ -1735,7 +1995,7 @@ document.addEventListener('keydown', (e) => {
 function renderSessions() {
   const el = document.getElementById('sessions-list');
   if (!sessions.length) {
-    el.innerHTML = `<p style="text-align:center;color:var(--text-muted);font-family:var(--font-mono);font-size:11px;padding:20px 0">No active SSH connections</p>`;
+    el.innerHTML = `<p style="text-align:center;color:var(--text-muted);font-family:var(--font-mono);font-size:11px;padding:20px 0">No active SSH / Telnet connections</p>`;
     return;
   }
   el.innerHTML = '';
@@ -1745,7 +2005,6 @@ function renderSessions() {
     const card = document.createElement('div');
     card.className = 'session-card';
 
-    // Determine threat level badge
     const threatLevel = s.threat_level || 'LOW';
     const threatBadge = threatLevel === 'CRITICAL'
       ? '<span class="badge" style="border-color:var(--red);color:var(--red);font-weight:bold;margin-left:8px;padding:2px 8px;font-size:8px;">🔴 CRITICAL</span>'
@@ -1783,33 +2042,69 @@ function renderSessions() {
 
 async function killSession(sessionId, ip) {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/kill`, { method: 'POST' });
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, { method: 'POST' });
     const data = await res.json();
     if (data.status === 'ok') { showToast(`✅ Session terminated: ${ip}`); fetchSessions(); }
     else showToast(data.message, true);
   } catch (e) { showToast('Network error', true); }
 }
 
+async function handleManualBlock(event) {
+  event.preventDefault();
+  const input = document.getElementById('manual-block-ip');
+  const ip = (input.value || '').trim();
+  if (!ip) return;
+  const ok = await blockAndKill(ip);
+  if (ok) input.value = '';
+}
+
 async function blockAndKill(ip) {
   try {
-    const res = await fetch(`/api/block/${ip}`, { method: 'POST' });
+    const res = await fetch(`/api/block/${encodeURIComponent(ip)}`, { method: 'POST' });
     const data = await res.json();
+    if (data.status === 'error') {
+      showToast(data.message || 'Invalid IP address', true);
+      return false;
+    }
     showToast(`🚫 IP ${ip} blocked${data.sessions_terminated ? ` · ${data.sessions_terminated} session(s) killed` : ''}`);
-    blockedIps.add(ip);
+    blockedIps.add(data.blocked_ip || ip);
     document.getElementById('stat-blocked').textContent = blockedIps.size;
     fetchSessions();
     renderTopIPs(stats.top_ips || []);
-  } catch (e) { showToast('Network error', true); }
+    renderBlockedChips();
+    return true;
+  } catch (e) { showToast('Network error', true); return false; }
 }
 
 async function unblockIP(ip) {
   try {
-    await fetch(`/api/unblock/${ip}`, { method: 'POST' });
+    const res = await fetch(`/api/unblock/${encodeURIComponent(ip)}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'error') {
+      showToast(data.message || 'Unblock failed', true);
+      return;
+    }
     blockedIps.delete(ip);
     showToast(`✅ IP ${ip} unblocked`);
     document.getElementById('stat-blocked').textContent = blockedIps.size;
     renderTopIPs(stats.top_ips || []);
+    renderBlockedChips();
   } catch (e) { showToast('Network error', true); }
+}
+
+function renderBlockedChips() {
+  const el = document.getElementById('blocked-chips');
+  if (!el) return;
+  if (!blockedIps.size) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = Array.from(blockedIps).sort().map(ip => `
+    <span class="blocked-chip">
+      <span>🚫 ${escHtml(ip)}</span>
+      <button type="button" onclick="unblockIP('${safeIp(ip)}')" title="Unblock ${escHtml(ip)}">✕</button>
+    </span>
+  `).join('');
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

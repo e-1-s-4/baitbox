@@ -794,12 +794,17 @@ class VirtualFilesystem:
                 return True
             return self.write_file(path, b"")
 
+    def _total_bytes(self) -> int:
+        return sum(len(v) for v in self.fs.values() if isinstance(v, bytes))
+
     def append_file(self, path: str, content: bytes) -> bool:
         """Append bytes to an existing file, or create it if missing."""
         with self._lock:
             if path in self.fs and self.is_file(path):
                 existing = self.fs[path]
                 if len(existing) + len(content) > MAX_FILE_SIZE:
+                    return False
+                if self._total_bytes() + len(content) > MAX_TOTAL_FS_SIZE:
                     return False
                 self.fs[path] = existing + content
                 meta = self._metadata.setdefault(path, {})
@@ -812,9 +817,12 @@ class VirtualFilesystem:
     def truncate(self, path: str, size: int = 0) -> bool:
         """Truncate a file to a specified length."""
         with self._lock:
-            if not self.is_file(path):
+            if not self.is_file(path) or size < 0 or size > MAX_FILE_SIZE:
                 return False
             data = self.fs[path]
+            delta = size - len(data)
+            if delta > 0 and self._total_bytes() + delta > MAX_TOTAL_FS_SIZE:
+                return False
             if size < len(data):
                 self.fs[path] = data[:size]
             else:
@@ -868,6 +876,9 @@ class VirtualFilesystem:
         with self._lock:
             if len(content) > MAX_FILE_SIZE:
                 return False
+            existing_size = len(self.fs[path]) if isinstance(self.fs.get(path), bytes) else 0
+            if self._total_bytes() - existing_size + len(content) > MAX_TOTAL_FS_SIZE:
+                return False
             parent = "/".join(path.split("/")[:-1])
             if not parent:
                 parent = "/"
@@ -918,9 +929,28 @@ class VirtualFilesystem:
             }
             return True
 
+    def mkdir_p(self, path: str) -> bool:
+        """Create directory and any missing parent directories (mkdir -p)."""
+        with self._lock:
+            if path == "/":
+                return True
+            if self.is_file(path):
+                return False
+            parts = [p for p in path.split("/") if p]
+            cur = ""
+            for part in parts:
+                cur = f"{cur}/{part}"
+                if cur in self.fs:
+                    if not self.is_dir(cur):
+                        return False
+                    continue
+                if not self.mkdir(cur):
+                    return False
+            return True
+
     def rm(self, path: str) -> bool:
         with self._lock:
-            if self.is_file(path):
+            if self.is_file(path) or self.is_symlink(path):
                 del self.fs[path]
                 self._metadata.pop(path, None)
                 return True

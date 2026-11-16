@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 import secrets
 import threading
 import time
@@ -65,6 +66,7 @@ def create_jwt_token(username: str, expires_delta: dt.timedelta | None = None) -
 # leftover JWT immediately loses access without waiting for natural expiry.
 _revoked_jtis: dict[str, float] = {}
 _revocation_lock = threading.Lock()
+_MAX_REVOKED_JTIS = 10000
 
 
 def _revoke_token(token: str) -> None:
@@ -84,6 +86,10 @@ def _revoke_token(token: str) -> None:
         expired = [j for j, e in _revoked_jtis.items() if e <= now]
         for j in expired:
             del _revoked_jtis[j]
+        if len(_revoked_jtis) > _MAX_REVOKED_JTIS:
+            oldest = sorted(_revoked_jtis.items(), key=lambda kv: kv[1])[: len(_revoked_jtis) - _MAX_REVOKED_JTIS]
+            for j, _ in oldest:
+                _revoked_jtis.pop(j, None)
 
 
 def verify_jwt_token(token: str) -> str | None:
@@ -97,7 +103,8 @@ def verify_jwt_token(token: str) -> str | None:
         with _revocation_lock:
             if jti in _revoked_jtis:
                 return None
-    return payload.get("sub")
+    sub = payload.get("sub")
+    return sub if isinstance(sub, str) and sub else None
 
 
 # Pre-computed hash of a random secret so unknown usernames cost the same
@@ -180,6 +187,14 @@ async def verify_user_credentials(username: str, password: str) -> bool:
         return False
 
 
+def _canonical_path(raw_path: str) -> str:
+    """Collapse duplicate slashes and trim trailing slash (except root) for auth checks."""
+    cleaned = re.sub(r"/+", "/", raw_path or "/")
+    if len(cleaned) > 1:
+        cleaned = cleaned.rstrip("/") or "/"
+    return cleaned
+
+
 class AuthMiddleware:
     def __init__(self, app: ASGIApp):
         self.app = app
@@ -189,7 +204,7 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        path = scope.get("path", "")
+        path = _canonical_path(scope.get("path", ""))
 
         is_dashboard_route = _is_dashboard_route(path)
         is_public = path in ("/login", "/logout", "/api/auth/login", "/healthz", "/readyz")
@@ -352,6 +367,7 @@ _DASHBOARD_API_EXACT_PATHS = {
     "/api/attack-summary",
     "/api/ioc",
     "/api/simulate",
+    "/api/system",
     "/metrics",
 }
 
@@ -371,6 +387,7 @@ def _is_dashboard_route(path: str) -> bool:
     auth matcher precise prevents common scanner targets such as
     ``/api/v1/users`` from being hidden behind dashboard authentication.
     """
+    path = _canonical_path(path)
     if path in ("/", "/ws/feed"):
         return True
     if path in _DASHBOARD_API_EXACT_PATHS:
@@ -874,6 +891,7 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
     events = await get_recent_events(limit=_limit_value(limit, maximum=5000))
     fmt = format.lower()
     if fmt == "csv":
+        from ..telemetry import sanitize_csv_cell
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
@@ -887,14 +905,14 @@ async def api_events_export(limit: int = 500, format: str = "json") -> Response:
             event = _enrich_event(dict(raw_event))
             writer.writerow({
                 "id": event.get("id", ""),
-                "timestamp": event.get("timestamp", ""),
-                "src_ip": event.get("src_ip", ""),
-                "protocol": event.get("protocol", ""),
-                "event_type": event.get("event_type", ""),
+                "timestamp": sanitize_csv_cell(event.get("timestamp", "")),
+                "src_ip": sanitize_csv_cell(event.get("src_ip", "")),
+                "protocol": sanitize_csv_cell(event.get("protocol", "")),
+                "event_type": sanitize_csv_cell(event.get("event_type", "")),
                 "threat_score": event.get("threat_score", ""),
-                "threat_level": event.get("threat_level", ""),
-                "mitre_techniques": ";".join(event.get("mitre_techniques", []) or []),
-                "payload": json.dumps(event.get("payload", {}), sort_keys=True, default=str),
+                "threat_level": sanitize_csv_cell(event.get("threat_level", "")),
+                "mitre_techniques": sanitize_csv_cell(";".join(event.get("mitre_techniques", []) or [])),
+                "payload": sanitize_csv_cell(json.dumps(event.get("payload", {}), sort_keys=True, default=str)),
             })
         return Response(
             output.getvalue(),
@@ -994,8 +1012,25 @@ async def api_stats() -> dict[str, Any]:
     return stats
 
 
+@app.get("/api/system")
+async def api_system_info() -> dict[str, Any]:
+    """Return safe, non-secret runtime metadata for the dashboard header."""
+    return {
+        "version": APP_VERSION,
+        "ssh_port": getattr(settings, "ssh_port", 2222),
+        "telnet_enabled": getattr(settings, "telnet_enabled", True),
+        "telnet_port": getattr(settings, "telnet_port", 2323),
+        "dashboard_port": getattr(settings, "dashboard_port", 8000),
+        "ssh_banner_hostname": getattr(settings, "ssh_banner_hostname", "web-prod-01"),
+        "database_type": getattr(settings, "database_type", "sqlite"),
+        "geoip_enabled": getattr(settings, "geoip_enabled", True),
+        "trust_proxy": getattr(settings, "trust_proxy", False),
+        "metrics_enabled": getattr(settings, "metrics_enabled", True),
+    }
+
+
 @app.post("/api/simulate")
-async def api_simulate_attack(request: Request) -> dict[str, Any]:
+async def api_simulate_attack(request: Request) -> Response:
     """Generate realistic simulated attack traffic for testing and live demonstration."""
     import random
     import time
@@ -1009,6 +1044,15 @@ async def api_simulate_attack(request: Request) -> dict[str, Any]:
     except Exception:
         pass
     scenario = body.get("scenario", "ssh_bruteforce")
+    allowed_scenarios = {"ssh_bruteforce", "web_recon", "shell_intrusion", "critical_exploit"}
+    if not isinstance(scenario, str) or scenario not in allowed_scenarios:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Unknown scenario '{scenario}'. Allowed: {', '.join(sorted(allowed_scenarios))}",
+            },
+            status_code=400,
+        )
 
     attacker_profiles = [
         {"ip": "185.220.101.42", "country": "Germany", "countryCode": "DE", "city": "Frankfurt", "lat": 50.1109, "lon": 8.6821, "isp": "Tor Exit Node"},
@@ -1110,7 +1154,7 @@ async def api_simulate_attack(request: Request) -> dict[str, Any]:
         await pubsub.publish(enriched)
         generated.append(enriched)
 
-    return {"status": "ok", "scenario": scenario, "events_generated": len(generated)}
+    return JSONResponse({"status": "ok", "scenario": scenario, "events_generated": len(generated)})
 
 
 
@@ -1121,8 +1165,8 @@ async def api_sessions() -> list[dict[str, Any]]:
     return [_enrich_event(s) for s in sessions]
 
 
-@app.get("/api/sessions/{session_id}/transcript")
-async def api_session_transcript(session_id: str) -> dict[str, Any]:
+@app.get("/api/sessions/{session_id}/transcript", response_model=None)
+async def api_session_transcript(session_id: str) -> Response | dict[str, Any]:
     """Full command transcript for one honeypot session (forensic review)."""
     from ..sessions import session_manager
     session = session_manager.get_session(session_id)

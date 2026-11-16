@@ -130,6 +130,9 @@ _MAX_LINES_PER_BATCH = 64
 _MAX_BUFFER_BYTES = 262144
 
 
+_TELNET_IDLE_TIMEOUT = 300.0
+
+
 class TelnetHoneypot(asyncio.Protocol):
     """Asyncio protocol implementing a fake Telnet server with a VFS shell."""
 
@@ -143,7 +146,36 @@ class TelnetHoneypot(asyncio.Protocol):
         self._buf = b""
         self._pending_iac = b""
         self._drain_scheduled = False
+        self._idle_handle: asyncio.TimerHandle | None = None
         self.session: SSHSession | None = None
+
+    def _is_transport_closing(self) -> bool:
+        if self.transport is None:
+            return True
+        is_closing = getattr(self.transport, "is_closing", None)
+        if callable(is_closing):
+            return bool(is_closing())
+        return bool(getattr(self.transport, "closed", False))
+
+    def _safe_write(self, data: bytes) -> None:
+        if not self._is_transport_closing() and self.transport is not None:
+            self.transport.write(data)
+
+    def _reset_idle_timer(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+        try:
+            loop = asyncio.get_running_loop()
+            self._idle_handle = loop.call_later(_TELNET_IDLE_TIMEOUT, self._on_idle_timeout)
+        except RuntimeError:
+            pass
+
+    def _on_idle_timeout(self) -> None:
+        logger.info("Closing idle Telnet connection from %s", self.peer_ip)
+        self._teardown_session()
+        if not self._is_transport_closing() and self.transport is not None:
+            self.transport.close()
 
     # ── asyncio.Protocol lifecycle ──────────────────────────────────────────
 
@@ -156,9 +188,11 @@ class TelnetHoneypot(asyncio.Protocol):
         if is_blocked(self.peer_ip) or is_rate_limited(self.peer_ip, "Telnet"):
             transport.close()
             return
+        self._reset_idle_timer()
         transport.write(_BANNER)
 
     def data_received(self, data: bytes) -> None:
+        self._reset_idle_timer()
         stream = self._pending_iac + data
         clean, self._pending_iac = _split_telnet_stream(stream)
         self._buf += clean
@@ -209,11 +243,16 @@ class TelnetHoneypot(asyncio.Protocol):
     # ── State machine ───────────────────────────────────────────────────────
 
     async def _handle_line(self, line: str) -> None:
-        assert self.transport is not None
+        if self._is_transport_closing() or self.transport is None:
+            return
+        if is_blocked(self.peer_ip):
+            self._teardown_session()
+            self.transport.close()
+            return
 
         if self.state == "login":
             self.username = line[:64] or "root"
-            self.transport.write(b"Password: ")
+            self._safe_write(b"Password: ")
             self.state = "password"
 
         elif self.state == "password":
@@ -226,40 +265,51 @@ class TelnetHoneypot(asyncio.Protocol):
             )
             await _publish(event)
             self._enter_shell()
-            self.transport.write(_MOTD_TEMPLATE.format(hostname=HOSTNAME).encode())
-            self.transport.write(self.prompt())
+            self._safe_write(_MOTD_TEMPLATE.format(hostname=HOSTNAME).encode())
+            self._safe_write(self.prompt())
             self.state = "shell"
 
         elif self.state == "shell":
             command = line.strip()
 
             if len(command) > settings.max_command_length:
-                self.transport.write(b"bash: command line too long\r\n" + self.prompt())
+                self._safe_write(b"bash: command line too long\r\n" + self.prompt())
                 return
 
             if not command:
-                self.transport.write(self.prompt())
+                self._safe_write(self.prompt())
                 return
 
+            cwd_before = self.session.cwd if self.session else "/root"
             event = await log_event(
                 self.peer_ip,
                 "Telnet",
                 "command",
-                {"command": command, "username": self.username},
+                {
+                    "command": command,
+                    "username": self.username,
+                    "cwd": cwd_before,
+                    "session_id": self.session_id,
+                },
             )
             await _publish(event)
 
             response, should_close = self.run_command(command)
-            self.transport.write(response)
+            self._safe_write(response)
             if should_close or command in {"exit", "logout", "quit"}:
-                self.transport.write(b"\r\nlogout\r\n")
+                if b"logout\r\n" not in response:
+                    self._safe_write(b"\r\nlogout\r\n")
                 self._teardown_session()
-                self.transport.close()
+                if not self._is_transport_closing() and self.transport is not None:
+                    self.transport.close()
                 return
-            self.transport.write(self.prompt())
+            self._safe_write(self.prompt())
 
     def _teardown_session(self) -> None:
-        """Unregister the tracked session (idempotent)."""
+        """Unregister the tracked session and cancel timers (idempotent)."""
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
         if self.session_id:
             session_manager.unregister(self.session_id)
             self.session_id = ""

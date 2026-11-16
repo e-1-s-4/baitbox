@@ -6,6 +6,7 @@ import datetime as dt
 import ipaddress
 import json
 import logging
+from urllib.parse import urlparse
 from typing import Any, Dict, Optional
 
 from . import __version__
@@ -86,6 +87,30 @@ def clamp_limit(
     except (ValueError, TypeError):
         return default
     return max(minimum, min(val, maximum))
+
+
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_csv_cell(value: Any) -> str:
+    """Neutralize spreadsheet formula injection when exporting untrusted values to CSV."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text and text[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + text
+    return text
+
+
+def validate_webhook_url(url: str) -> str:
+    """Validate that a webhook URL uses http:// or https:// with a valid host."""
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Webhook URL must be a non-empty string.")
+    clean = url.strip()
+    parsed = urlparse(clean)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"Unsupported or invalid webhook URL: '{clean}'")
+    return clean
 
 
 # ── SIEM Export: Common Event Format (CEF) ──────────────────────────────────

@@ -18,7 +18,7 @@ import datetime as dt
 from typing import Any
 
 from .anomaly import get_threat_score
-from .telemetry import validate_ip_address
+from .telemetry import sanitize_csv_cell, validate_ip_address
 
 _THREAT_ORDER = {"CRITICAL": 0, "MEDIUM": 1, "LOW": 2}
 
@@ -162,13 +162,13 @@ def ioc_feed_to_csv(feed: dict[str, Any]) -> str:
     ])
     for m in feed.get("malicious_ips", []):
         writer.writerow([
-            m.get("ip", ""),
+            sanitize_csv_cell(m.get("ip", "")),
             m.get("threat_score", 0),
-            m.get("threat_level", ""),
+            sanitize_csv_cell(m.get("threat_level", "")),
             m.get("event_count", 0),
-            m.get("first_seen", ""),
-            m.get("last_seen", ""),
-            ";".join(m.get("protocols", [])),
+            sanitize_csv_cell(m.get("first_seen", "")),
+            sanitize_csv_cell(m.get("last_seen", "")),
+            sanitize_csv_cell(";".join(m.get("protocols", []))),
             "1" if m.get("blocked") else "0",
         ])
     return out.getvalue()

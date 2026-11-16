@@ -42,18 +42,22 @@ _SUSPICIOUS_ASN_KEYWORDS = {
 }
 
 
+_CACHE_LOCK = threading.RLock()
+
+
 def _cache_put(ip: str, data: dict[str, Any], expires: float) -> None:
     """Store a cache entry, evicting expired/oldest entries when over capacity."""
-    if len(_CACHE) >= _CACHE_MAX_ENTRIES and ip not in _CACHE:
-        now = time.time()
-        expired = [k for k, v in _CACHE.items() if v["expires"] <= now]
-        for k in expired:
-            del _CACHE[k]
-        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
-            oldest = sorted(_CACHE.items(), key=lambda kv: kv[1]["expires"])[: len(_CACHE) // 4]
-            for k, _ in oldest:
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX_ENTRIES and ip not in _CACHE:
+            now = time.time()
+            expired = [k for k, v in _CACHE.items() if v["expires"] <= now]
+            for k in expired:
                 del _CACHE[k]
-    _CACHE[ip] = {"data": data, "expires": expires}
+            if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+                oldest = sorted(_CACHE.items(), key=lambda kv: kv[1]["expires"])[: max(1, len(_CACHE) // 4)]
+                for k, _ in oldest:
+                    del _CACHE[k]
+        _CACHE[ip] = {"data": data, "expires": expires}
 
 
 def cache_geo(ip: str, data: dict[str, Any], ttl: int = _TTL) -> None:
@@ -99,17 +103,18 @@ async def lookup_ip(ip: str) -> dict[str, Any]:
             "city": "Local Host",
             "country": "Private Network",
             "countryCode": "XX",
-            "lat": 37.7749,
-            "lon": -122.4194,
+            "lat": None,
+            "lon": None,
+            "is_private": True,
             "isp": "Loopback",
             "org": "Private",
             "threat_score": 0,
         }
 
     now = time.time()
-    cached = _CACHE.get(ip)
-    if cached and cached["expires"] > now:
-        return cached["data"]
+    cached = get_cached(ip)
+    if cached is not None:
+        return cached
 
     try:
         from .db import get_geoip_cache
@@ -211,9 +216,10 @@ def _unknown_geoip(ip: str, reason: str = "unknown") -> dict[str, Any]:
 
 def get_cached(ip: str) -> dict[str, Any] | None:
     """Return cached GeoIP data without performing a fresh lookup."""
-    entry = _CACHE.get(ip)
-    if entry and entry["expires"] > time.time():
-        return entry["data"]
+    with _CACHE_LOCK:
+        entry = _CACHE.get(ip)
+        if entry and entry["expires"] > time.time():
+            return entry["data"]
     return None
 
 

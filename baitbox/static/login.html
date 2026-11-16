@@ -26,8 +26,8 @@
       --border-bright: rgba(30, 80, 160, 0.6);
 
       --text-primary:  #e8f0fe;
-      --text-secondary:#8ba3c9;
-      --text-muted:    #4a6080;
+      --text-secondary:#9cb3d6;
+      --text-muted:    #7590b8;
 
       --green:   #00f5a0;
       --green-d: rgba(0, 245, 160, 0.1);
@@ -46,6 +46,11 @@
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
 
     body {
       font-family: var(--font-sans);
@@ -104,6 +109,9 @@
       overflow: hidden;
       transition: border-color 0.3s, box-shadow 0.3s;
     }
+    @media (max-width: 460px) {
+      .login-card { padding: 28px 22px; }
+    }
     .login-card:hover {
       border-color: var(--border-bright);
       box-shadow: 0 15px 35px rgba(0,0,0,0.7), 0 0 35px rgba(0, 212, 255, 0.1);
@@ -160,6 +168,8 @@
     }
     .input-wrapper {
       position: relative;
+      display: flex;
+      align-items: center;
     }
     .input-field {
       width: 100%;
@@ -173,10 +183,29 @@
       transition: all 0.3s;
       outline: none;
     }
+    .input-field.has-toggle { padding-right: 60px; }
     .input-field:focus {
       border-color: var(--cyan);
       box-shadow: 0 0 10px rgba(0, 212, 255, 0.15);
       background: var(--bg-base);
+    }
+    .pw-toggle {
+      position: absolute;
+      right: 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.8px;
+      padding: 4px 7px;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .pw-toggle:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
     }
 
     /* ── Button ── */
@@ -236,6 +265,7 @@
       color: var(--text-muted);
       letter-spacing: 1px;
       z-index: 2;
+      padding: 0 16px;
     }
   </style>
 </head>
@@ -254,16 +284,16 @@
         </div>
       </div>
 
-      <div class="error-box" id="error-box">
+      <div class="error-box" id="error-box" role="alert">
         <span>⚠️</span> <span id="error-msg">Invalid credentials. Access Denied.</span>
       </div>
 
-      <div class="demo-hint" id="demo-hint" style="background: rgba(0, 245, 160, 0.08); border: 1px solid rgba(0, 245, 160, 0.25); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 20px; font-family: var(--font-mono); font-size: 11px; display: none; align-items: center; justify-content: space-between; gap: 8px;">
-        <div>
-          <span style="color: var(--green); font-weight: 700;">DEFAULT ACCESS:</span>
-          <span style="color: var(--text-secondary); margin-left: 6px;">admin / admin</span>
+      <div class="demo-hint" id="demo-hint" style="background: rgba(0, 245, 160, 0.08); border: 1px solid rgba(0, 245, 160, 0.25); border-radius: var(--radius-sm); padding: 9px 11px; margin-bottom: 20px; font-family: var(--font-mono); font-size: 10.5px; display: none; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: nowrap;">
+        <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          <span style="color: var(--green); font-weight: 700;">DEFAULT:</span>
+          <span style="color: var(--text-secondary); margin-left: 4px;">admin / admin</span>
         </div>
-        <button type="button" id="quick-fill-btn" style="background: rgba(0, 245, 160, 0.15); border: 1px solid var(--green); color: var(--green); padding: 4px 10px; border-radius: 4px; font-family: var(--font-mono); font-size: 10px; font-weight: 700; cursor: pointer; transition: all 0.2s;">QUICK FILL</button>
+        <button type="button" id="quick-fill-btn" style="background: rgba(0, 245, 160, 0.15); border: 1px solid var(--green); color: var(--green); padding: 4px 8px; border-radius: 4px; font-family: var(--font-mono); font-size: 9.5px; font-weight: 700; cursor: pointer; transition: all 0.2s; white-space: nowrap; flex-shrink: 0;">QUICK FILL</button>
       </div>
 
       <form id="login-form">
@@ -277,7 +307,8 @@
         <div class="form-group">
           <label class="form-label" for="password">Password</label>
           <div class="input-wrapper">
-            <input class="input-field" type="password" id="password" name="password" required autocomplete="current-password">
+            <input class="input-field has-toggle" type="password" id="password" name="password" required autocomplete="current-password">
+            <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Toggle password visibility">SHOW</button>
           </div>
         </div>
 
@@ -295,10 +326,19 @@
     const demoEnabled = window.BAITBOX_DEMO === true;
     const usernameInput = document.getElementById('username');
     const passwordInput = document.getElementById('password');
+    const pwToggle = document.getElementById('pw-toggle');
     const submitBtn = document.getElementById('submit-btn');
     const errorBox = document.getElementById('error-box');
     const errorMsg = document.getElementById('error-msg');
     const quickFillBtn = document.getElementById('quick-fill-btn');
+
+    if (pwToggle && passwordInput) {
+      pwToggle.addEventListener('click', () => {
+        const show = passwordInput.type === 'password';
+        passwordInput.type = show ? 'text' : 'password';
+        pwToggle.textContent = show ? 'HIDE' : 'SHOW';
+      });
+    }
 
     function fillDemo() {
       usernameInput.value = 'admin';

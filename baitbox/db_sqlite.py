@@ -6,6 +6,7 @@ and avoids ``database is locked`` errors under concurrent writes.
 """
 
 from __future__ import annotations
+import asyncio
 import datetime as dt
 import json
 import time
@@ -18,6 +19,18 @@ DB_NAME = settings.database_path
 
 _connection: Optional[aiosqlite.Connection] = None
 _connection_path: str | None = None
+_db_lock: Optional[asyncio.Lock] = None
+_db_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """Return an asyncio.Lock bound to the currently running event loop."""
+    global _db_lock, _db_lock_loop
+    loop = asyncio.get_running_loop()
+    if _db_lock is None or _db_lock_loop is not loop:
+        _db_lock = asyncio.Lock()
+        _db_lock_loop = loop
+    return _db_lock
 
 
 async def _get_db() -> aiosqlite.Connection:
@@ -50,13 +63,14 @@ async def _get_db() -> aiosqlite.Connection:
 async def close_connection() -> None:
     """Close the shared connection (used on shutdown / between tests)."""
     global _connection, _connection_path
-    if _connection is not None:
-        try:
-            await _connection.close()
-        except Exception:
-            pass
-    _connection = None
-    _connection_path = None
+    async with _get_lock():
+        if _connection is not None:
+            try:
+                await _connection.close()
+            except Exception:
+                pass
+        _connection = None
+        _connection_path = None
 
 
 class SQLiteDB:
@@ -65,71 +79,72 @@ class SQLiteDB:
         await close_connection()
 
     async def init_db(self) -> None:
-        db = await _get_db()
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                src_ip TEXT NOT NULL,
-                protocol TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                payload TEXT NOT NULL
+        async with _get_lock():
+            db = await _get_db()
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    src_ip TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_src_ip ON events(src_ip)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_protocol ON events(protocol)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_protocol_type ON events(protocol, event_type)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_events_src_ip ON events(src_ip)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_events_protocol ON events(protocol)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_events_protocol_type ON events(protocol, event_type)")
 
-        # GeoIP cache table
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS geoip_cache (
-                ip TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                expires_at REAL NOT NULL
+            # GeoIP cache table
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS geoip_cache (
+                    ip TEXT PRIMARY KEY,
+                    data TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+                """
             )
-            """
-        )
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_geoip_cache_expires ON geoip_cache(expires_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_geoip_cache_expires ON geoip_cache(expires_at)")
 
-        # Users table for dashboard auth
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL
+            # Users table for dashboard auth
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
 
-        # Persisted IP block list (survives restarts)
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS blocked_ips (
-                ip TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL
+            # Persisted IP block list (survives restarts)
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blocked_ips (
+                    ip TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
 
-        await db.commit()
+            await db.commit()
 
-        # Ensure the configured user exists and is up to date
-        import bcrypt
-        hashed = bcrypt.hashpw(settings.dashboard_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        await db.execute(
-            """
-            INSERT INTO users (username, password_hash)
-            VALUES (?, ?)
-            ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
-            """,
-            (settings.dashboard_username, hashed),
-        )
-        await db.commit()
+            # Ensure the configured user exists and is up to date
+            import bcrypt
+            hashed = bcrypt.hashpw(settings.dashboard_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+            await db.execute(
+                """
+                INSERT INTO users (username, password_hash)
+                VALUES (?, ?)
+                ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+                """,
+                (settings.dashboard_username, hashed),
+            )
+            await db.commit()
 
     async def prune_events(self, retention_hours: int) -> int:
         """Delete events older than the retention window. Returns rows removed."""
@@ -138,11 +153,12 @@ class SQLiteDB:
         cutoff = (
             dt.datetime.now(dt.UTC) - dt.timedelta(hours=retention_hours)
         ).isoformat()
-        db = await _get_db()
-        cursor = await db.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
-        await db.execute("DELETE FROM geoip_cache WHERE expires_at <= ?", (time.time(),))
-        await db.commit()
-        return cursor.rowcount or 0
+        async with _get_lock():
+            db = await _get_db()
+            cursor = await db.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+            await db.execute("DELETE FROM geoip_cache WHERE expires_at <= ?", (time.time(),))
+            await db.commit()
+            return cursor.rowcount or 0
 
     async def get_geoip_cache(self, ip: str) -> Optional[Dict[str, Any]]:
         db = await _get_db()
@@ -163,29 +179,31 @@ class SQLiteDB:
 
     async def set_geoip_cache(self, ip: str, data: Dict[str, Any], ttl: int = 3600) -> None:
         expires_at = time.time() + ttl
-        db = await _get_db()
-        await db.execute(
-            """
-            INSERT INTO geoip_cache (ip, data, expires_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(ip) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at
-            """,
-            (ip, json.dumps(data, sort_keys=True), expires_at),
-        )
-        await db.execute("DELETE FROM geoip_cache WHERE expires_at <= ?", (time.time(),))
-        await db.commit()
+        async with _get_lock():
+            db = await _get_db()
+            await db.execute(
+                """
+                INSERT INTO geoip_cache (ip, data, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ip) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at
+                """,
+                (ip, json.dumps(data, sort_keys=True), expires_at),
+            )
+            await db.execute("DELETE FROM geoip_cache WHERE expires_at <= ?", (time.time(),))
+            await db.commit()
 
     async def log_event(self, src_ip: str, protocol: str, event_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         timestamp = dt.datetime.now(dt.UTC).isoformat()
         payload_str = json.dumps(payload, sort_keys=True)
 
-        db = await _get_db()
-        cursor = await db.execute(
-            "INSERT INTO events (timestamp, src_ip, protocol, event_type, payload) VALUES (?, ?, ?, ?, ?)",
-            (timestamp, src_ip, protocol, event_type, payload_str),
-        )
-        await db.commit()
-        event_id = cursor.lastrowid
+        async with _get_lock():
+            db = await _get_db()
+            cursor = await db.execute(
+                "INSERT INTO events (timestamp, src_ip, protocol, event_type, payload) VALUES (?, ?, ?, ?, ?)",
+                (timestamp, src_ip, protocol, event_type, payload_str),
+            )
+            await db.commit()
+            event_id = cursor.lastrowid
 
         event = {
             "id": event_id,
@@ -311,7 +329,7 @@ class SQLiteDB:
             """
             SELECT json_extract(payload, '$.path') AS path, COUNT(*) AS count
             FROM events
-            WHERE protocol = 'HTTP'
+            WHERE protocol = 'HTTP' AND json_extract(payload, '$.path') IS NOT NULL
             GROUP BY path
             ORDER BY count DESC
             LIMIT 10
@@ -331,18 +349,20 @@ class SQLiteDB:
         }
 
     async def block_ip(self, ip: str) -> None:
-        db = await _get_db()
-        await db.execute(
-            "INSERT INTO blocked_ips (ip, created_at) VALUES (?, ?)"
-            " ON CONFLICT(ip) DO NOTHING",
-            (ip, dt.datetime.now(dt.UTC).isoformat()),
-        )
-        await db.commit()
+        async with _get_lock():
+            db = await _get_db()
+            await db.execute(
+                "INSERT INTO blocked_ips (ip, created_at) VALUES (?, ?)"
+                " ON CONFLICT(ip) DO NOTHING",
+                (ip, dt.datetime.now(dt.UTC).isoformat()),
+            )
+            await db.commit()
 
     async def unblock_ip(self, ip: str) -> None:
-        db = await _get_db()
-        await db.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
-        await db.commit()
+        async with _get_lock():
+            db = await _get_db()
+            await db.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
+            await db.commit()
 
     async def get_blocked_ips(self) -> List[str]:
         db = await _get_db()

@@ -36,17 +36,21 @@ class SSHSession:
         self.last_seen = time.time()
         self.channel = channel
         self.transport = transport
-        self.cwd = "/root"
+        # Initialize a custom virtual filesystem for this session
+        from .vfs import VirtualFilesystem
+        self.vfs = VirtualFilesystem()
+
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        self.cwd = home_dir if self.vfs.is_dir(home_dir) else "/root"
         self.last_exit_code = 0
         # Bounded command history: attackers scripting loops over hours must
         # not grow memory without bound. Newest entries are always kept.
         from .config import settings
         self.commands: deque[Dict[str, Any]] = deque(maxlen=settings.max_session_commands)
+        # Separate forensic transcript buffer so `history -c` clears the user-visible
+        # shell history without erasing the honeypot operator's audit trail.
+        self._forensic_commands: deque[Dict[str, Any]] = deque(maxlen=settings.max_session_commands)
         self._total_commands = 0
-
-        # Initialize a custom virtual filesystem for this session
-        from .vfs import VirtualFilesystem
-        self.vfs = VirtualFilesystem()
 
     def add_command(self, command: str, exit_code: int | None = None) -> None:
         self.last_seen = time.time()
@@ -57,7 +61,16 @@ class SSHSession:
         if exit_code is not None:
             entry["exit_code"] = exit_code
         self.commands.append(entry)
+        self._forensic_commands.append(entry)
         self._total_commands += 1
+
+    def set_last_command_exit_code(self, exit_code: int) -> None:
+        """Record the final exit code on both shell history and forensic transcript."""
+        self.last_exit_code = exit_code
+        if self.commands:
+            self.commands[-1]["exit_code"] = exit_code
+        if self._forensic_commands:
+            self._forensic_commands[-1]["exit_code"] = exit_code
 
     def command_count(self) -> int:
         """Total commands executed this session (may exceed the stored window)."""
@@ -86,7 +99,7 @@ class SSHSession:
             "protocol": self.protocol,
             "login_time": self.login_time,
             "duration_seconds": round(time.time() - self.login_time, 2),
-            "command_count": len(self.commands),
+            "command_count": len(self._forensic_commands),
             "commands": [
                 {
                     "index": i,
@@ -94,7 +107,7 @@ class SSHSession:
                     "timestamp": c.get("timestamp"),
                     "exit_code": c.get("exit_code"),
                 }
-                for i, c in enumerate(self.commands)
+                for i, c in enumerate(self._forensic_commands)
             ],
         }
 

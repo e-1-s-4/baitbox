@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import queue
@@ -13,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import paramiko
 
@@ -104,10 +106,17 @@ class FakeShell(paramiko.ServerInterface):
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
         self.username = username
+        fp_getter = getattr(key, "get_fingerprint", None)
+        if callable(fp_getter):
+            raw_fp = fp_getter()
+            fp = raw_fp.hex() if isinstance(raw_fp, (bytes, bytearray)) else str(raw_fp)
+        else:
+            raw_fp = getattr(key, "fingerprint", "")
+            fp = raw_fp.hex() if isinstance(raw_fp, (bytes, bytearray)) else str(raw_fp)
         _log_from_thread(
             self.client_ip,
             "auth_attempt",
-            {"username": username, "method": "publickey", "key_type": key.get_name(), "fingerprint": key.fingerprint.hex()},
+            {"username": username, "method": "publickey", "key_type": key.get_name(), "fingerprint": fp},
         )
         return paramiko.AUTH_SUCCESSFUL
 
@@ -158,9 +167,7 @@ def _log_from_thread(src_ip: str, event_type: str, payload: dict[str, Any]) -> N
 
 
 def make_prompt(cwd: str, username: str = "root") -> bytes:
-    p = cwd
-    if p == "/root" or p == f"/home/{username}":
-        p = "~"
+    p = "~" if cwd == _home_for(username) else cwd
     char = "#" if username == "root" else "$"
     return f"{username}@{HOSTNAME}:{p}{char} ".encode()
 
@@ -348,12 +355,56 @@ def _expand_vars(text: str, session: SSHSession) -> str:
     def _sub_braced(match: re.Match[str]) -> str:
         return variables.get(match.group(1), "")
 
-    expanded = re.sub(r"\$\{(\w+)\}", _sub_braced, text)
-    # Substitute longer names first so ``$USERNAME`` is not clobbered by an
-    # earlier ``$USER`` replacement (which would leave ``rootNAME`` behind).
-    for name, value in sorted(variables.items(), key=lambda kv: len(kv[0]), reverse=True):
-        expanded = expanded.replace(f"${name}", value)
+    def _sub_bare(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in variables:
+            return variables[name]
+        return match.group(0)
+
+    expanded = re.sub(r"\$\{(\w+|\?|\$)\}", _sub_braced, text)
+    expanded = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*|\?|\$)", _sub_bare, expanded)
     return expanded
+
+
+def _expand_vars_unquoted(text: str, session: SSHSession) -> str:
+    """Expand variables only outside single-quoted literals (e.g., preserves awk '{print $1}')."""
+    out: list[str] = []
+    chunk: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_single:
+            out.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            chunk.append(ch)
+            chunk.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            chunk.append(ch)
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            if chunk:
+                out.append(_expand_vars("".join(chunk), session))
+                chunk = []
+            in_single = True
+            out.append(ch)
+            i += 1
+            continue
+        chunk.append(ch)
+        i += 1
+    if chunk:
+        out.append(_expand_vars("".join(chunk), session))
+    return "".join(out)
 
 
 _TR_CLASSES: dict[str, list[str]] = {
@@ -450,31 +501,35 @@ def _run_sed(script: str, lines: list[str], flags: list[str]) -> list[str]:
 
 def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> bytes:
     """Run the consuming side of a pipeline against upstream output."""
+    out, _ = _apply_stdin_filter_with_status(session, stage, stdin_data)
+    return out
+
+
+def _apply_stdin_filter_with_status(session: SSHSession, stage: str, stdin_data: bytes) -> tuple[bytes, int]:
+    """Run the consuming side of a pipeline against upstream output and return (output, exit_code)."""
     try:
         parts = shlex.split(stage, posix=True)
     except ValueError:
         parts = stage.split()
     if not parts:
-        return stdin_data
+        return stdin_data, 0
 
     executable = parts[0]
     flags = [a for a in parts[1:] if a.startswith("-") and len(a) > 1]
     operands = [a for a in parts[1:] if not a.startswith("-")]
 
-    def load_operand_file() -> bytes | None:
+    def load_operand_file() -> tuple[bytes | None, int]:
         if not operands:
-            return stdin_data
+            return stdin_data, 0
         path = session.vfs._normalize_path(session.cwd, operands[0])
         content = session.vfs.read_file(path)
         if content is None:
-            return f"{executable}: {operands[0]}: No such file or directory\r\n".encode()
-        return content
+            return f"{executable}: {operands[0]}: No such file or directory\r\n".encode(), 1
+        return content, 0
 
     # Standalone invocation with file operand(s), e.g. ``sort /etc/passwd`` or
     # ``awk '{print $1}' /etc/passwd``: fall back to reading those files as the
-    # input stream when nothing was piped in. Non-file operands (delimiters,
-    # scripts, character sets) simply do not resolve to VFS entries and are
-    # skipped.
+    # input stream when nothing was piped in.
     if not stdin_data and operands and executable in {"sort", "uniq", "cut", "tr", "tac", "xargs", "awk", "gawk", "sed"}:
         loaded_files = [
             loaded
@@ -491,16 +546,40 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
 
     if executable in {"grep", "egrep", "fgrep"}:
         if not operands:
-            return b"grep: missing pattern operand\r\n"
+            return b"grep: missing pattern operand\r\n", 2
         pattern = operands[0]
         source_lines = lines
         file_operands = operands[1:]
         if file_operands:
-            path = session.vfs._normalize_path(session.cwd, file_operands[0])
-            content = session.vfs.read_file(path)
-            if content is None:
-                return f"grep: {file_operands[0]}: No such file or directory\r\n".encode()
-            source_lines = content.decode("utf-8", errors="replace").splitlines()
+            collected_blocks: list[str] = []
+            had_error = False
+            any_matched = False
+            case_insensitive = "-i" in flags
+            invert = "-v" in flags
+            needle = pattern.lower() if case_insensitive else pattern
+            for fname in file_operands:
+                path = session.vfs._normalize_path(session.cwd, fname)
+                content = session.vfs.read_file(path)
+                if content is None:
+                    collected_blocks.append(f"grep: {fname}: No such file or directory")
+                    had_error = True
+                    continue
+                flines = content.decode("utf-8", errors="replace").splitlines()
+                matched = [
+                    ln for ln in flines
+                    if (needle in (ln.lower() if case_insensitive else ln)) != invert
+                ]
+                if matched:
+                    any_matched = True
+                if "-c" in flags:
+                    prefix = f"{fname}:" if len(file_operands) > 1 else ""
+                    collected_blocks.append(f"{prefix}{len(matched)}")
+                else:
+                    prefix = f"{fname}:" if len(file_operands) > 1 else ""
+                    collected_blocks.extend(prefix + ln for ln in matched)
+            out = ("\r\n".join(collected_blocks) + "\r\n").encode() if collected_blocks else b""
+            code = 2 if had_error else (0 if any_matched else 1)
+            return out, code
         case_insensitive = "-i" in flags
         invert = "-v" in flags
         needle = pattern.lower() if case_insensitive else pattern
@@ -509,35 +588,38 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             if (needle in (ln.lower() if case_insensitive else ln)) != invert
         ]
         if "-c" in flags:
-            return f"{len(matched)}\r\n".encode()
+            return f"{len(matched)}\r\n".encode(), (0 if matched else 1)
         if not matched:
-            return b""
-        prefix = f"{file_operands[0]}:" if len(file_operands) > 1 else ""
-        return ("\r\n".join(prefix + ln for ln in matched) + "\r\n").encode()
+            return b"", 1
+        return ("\r\n".join(matched) + "\r\n").encode(), 0
 
     if executable == "wc":
         counts_only = "".join(f.lstrip("-") for f in flags)
         if operands:
-            loaded = load_operand_file()
+            loaded, status = load_operand_file()
             if loaded is None:
-                return b""
+                return b"", 1
+            if status != 0:
+                return loaded, status
             src_text = loaded.decode("utf-8", errors="replace").rstrip("\n")
             src_lines = src_text.split("\n") if src_text else []
+            byte_len = len(loaded)
         else:
             trimmed = text.rstrip("\n")
             src_lines = trimmed.split("\n") if trimmed else []
             src_text = trimmed
+            byte_len = len(stdin_data)
         n_lines = len(src_lines)
         n_words = len(src_text.split())
-        n_bytes = len(stdin_data)
+        n_bytes = byte_len
         label = f" {operands[0]}" if operands else ""
         if counts_only == "l":
-            return f"{n_lines}{label}\r\n".encode()
+            return f"{n_lines}{label}\r\n".encode(), 0
         if counts_only == "w":
-            return f"{n_words}{label}\r\n".encode()
+            return f"{n_words}{label}\r\n".encode(), 0
         if counts_only == "c":
-            return f"{n_bytes}{label}\r\n".encode()
-        return f"{n_lines} {n_words} {n_bytes}{label}\r\n".encode()
+            return f"{n_bytes}{label}\r\n".encode(), 0
+        return f"{n_lines} {n_words} {n_bytes}{label}\r\n".encode(), 0
 
     if executable == "head":
         count = 10
@@ -554,13 +636,13 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
                     pass
             elif flag.startswith("-c") and len(flag) > 2:
                 try:
-                    return stdin_data[: int(flag[2:])] + b"\r\n"
+                    return stdin_data[: int(flag[2:])] + b"\r\n", 0
                 except (ValueError, TypeError):
                     pass
             elif flag.startswith("-") and flag[1:].isdigit():
                 count = int(flag[1:])
         selected = lines[:count] if count >= 0 else lines[:max(0, len(lines) + count)]
-        return ("\r\n".join(selected) + "\r\n").encode() if selected else b""
+        return (("\r\n".join(selected) + "\r\n").encode() if selected else b""), 0
 
     if executable == "tail":
         count = 10
@@ -578,7 +660,7 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             elif flag.startswith("-") and flag[1:].isdigit():
                 count = int(flag[1:])
         selected = lines[-count:] if count > 0 else []
-        return ("\r\n".join(selected) + "\r\n").encode() if selected else b""
+        return (("\r\n".join(selected) + "\r\n").encode() if selected else b""), 0
 
     if executable == "sort":
         reverse = "-r" in flags
@@ -587,7 +669,7 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
         ordered = sorted(set(lines) if unique else lines,
                          key=lambda ln: (float(re.sub(r"[^0-9.]", "", ln) or 0) if numeric else ln),
                          reverse=reverse)
-        return ("\r\n".join(ordered) + "\r\n").encode() if ordered else b""
+        return (("\r\n".join(ordered) + "\r\n").encode() if ordered else b""), 0
 
     if executable == "uniq":
         result: list[str] = []
@@ -603,7 +685,7 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             for ln in lines:
                 if not result or result[-1] != ln:
                     result.append(ln)
-        return ("\r\n".join(result) + "\r\n").encode() if result else b""
+        return (("\r\n".join(result) + "\r\n").encode() if result else b""), 0
 
     if executable == "cut":
         delim = "\t"
@@ -627,7 +709,7 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             return delim.join(cols[idx - 1] for idx in indices if 0 < idx <= len(cols))
 
         picked = [_pick(ln) for ln in lines]
-        return ("\r\n".join(picked) + "\r\n").encode() if picked else b""
+        return (("\r\n".join(picked) + "\r\n").encode() if picked else b""), 0
 
     if executable == "tr":
         sets = [a for a in parts[1:] if not a.startswith("-")]
@@ -636,22 +718,21 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             dst_chars = _expand_tr_set(sets[1])
             if src_chars and dst_chars:
                 if len(dst_chars) < len(src_chars):
-                    # POSIX tr extends the last SET2 character to match SET1.
                     dst_chars += [dst_chars[-1]] * (len(src_chars) - len(dst_chars))
                 table = {ord(s): d for s, d in zip(src_chars, dst_chars)}
-                return text.translate(table).encode()
-            return text.encode()
+                return text.translate(table).encode(), 0
+            return text.encode(), 0
         if "-d" in flags and sets:
             delete_chars = set(_expand_tr_set(sets[0]))
-            return "".join(ch for ch in text if ch not in delete_chars).encode()
-        return stdin_data
+            return "".join(ch for ch in text if ch not in delete_chars).encode(), 0
+        return stdin_data, 0
 
     if executable == "sed":
         if not operands:
-            return b"sed: missing script operand\r\n"
+            return b"sed: missing script operand\r\n", 1
         script = operands[0]
         edited = _run_sed(script, lines, flags)
-        return ("\r\n".join(edited) + "\r\n").encode() if edited else b""
+        return (("\r\n".join(edited) + "\r\n").encode() if edited else b""), 0
 
     if executable in {"awk", "gawk"}:
         match = re.search(r"\{.*print\s+\$?(\d+)\s*\}", stage)
@@ -660,33 +741,39 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
                   else (ln.split()[column - 1] if len(ln.split()) >= column else "")
                   for ln in lines]
         picked = [p for p in picked if p]
-        return ("\r\n".join(picked) + "\r\n").encode() if picked else b""
+        return (("\r\n".join(picked) + "\r\n").encode() if picked else b""), 0
 
     if executable == "tee":
         if operands:
             path = session.vfs._normalize_path(session.cwd, operands[0])
-            session.vfs.write_file(path, stdin_data)
-        return stdin_data
+            if "-a" in flags:
+                session.vfs.append_file(path, stdin_data)
+            else:
+                session.vfs.write_file(path, stdin_data)
+        return stdin_data, 0
 
     if executable in {"cat", "tac"}:
         if not operands:
             if executable == "tac":
-                return ("\r\n".join(reversed(lines)) + "\r\n").encode() if lines else b""
-            return stdin_data
-        loaded = load_operand_file() or b""
+                return (("\r\n".join(reversed(lines)) + "\r\n").encode() if lines else b""), 0
+            return stdin_data, 0
+        loaded, status = load_operand_file()
+        loaded_bytes = loaded or b""
+        if status != 0:
+            return loaded_bytes, status
         if executable == "tac":
-            tac_lines = loaded.decode("utf-8", errors="replace").splitlines()
-            return ("\r\n".join(reversed(tac_lines)) + "\r\n").encode() if tac_lines else b""
-        return loaded
+            tac_lines = loaded_bytes.decode("utf-8", errors="replace").splitlines()
+            return (("\r\n".join(reversed(tac_lines)) + "\r\n").encode() if tac_lines else b""), 0
+        return loaded_bytes, 0
 
     if executable == "base64":
         import base64 as b64
         if "-d" in flags or "--decode" in flags:
             try:
-                return b64.b64decode(text.strip()) + b"\r\n"
+                return b64.b64decode(text.strip()) + b"\r\n", 0
             except Exception:
-                return b"base64: invalid input\r\n"
-        return b64.b64encode(stdin_data) + b"\r\n"
+                return b"base64: invalid input\r\n", 1
+        return b64.b64encode(stdin_data) + b"\r\n", 0
 
     if executable in {"md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum"}:
         import hashlib
@@ -699,30 +786,26 @@ def _apply_stdin_filter(session: SSHSession, stage: str, stdin_data: bytes) -> b
             "sha512sum": hashlib.sha512,
         }[executable]
         label = operands[0] if operands else "-"
-        # Match real shell fidelity: `cat f | sha256sum` hashes the same bytes
-        # as `sha256sum f`, so normalize CRLF display output back to LF.
         normalized = stdin_data.replace(b"\r\n", b"\n")
-        return f"{algo(normalized).hexdigest()}  {label}\r\n".encode()
+        return f"{algo(normalized).hexdigest()}  {label}\r\n".encode(), 0
 
     if executable == "xargs":
         tokens = text.split()
         if not tokens:
-            return b""
+            return b"", 0
         command_operands = list(operands)
-        # ``xargs`` with no command defaults to ``echo``; with a command it runs
-        # that command with the tokens appended (single level, to avoid loops).
         if command_operands and "xargs" not in command_operands:
             sub = " ".join(command_operands + tokens)
-            output, _ = execute_session_command(session, sub)
-            return output
-        return (" ".join(tokens) + "\r\n").encode()
+            output, _, sub_code = _execute_session_command_with_status(session, sub, record=False)
+            return output, sub_code
+        return (" ".join(tokens) + "\r\n").encode(), 0
 
     if executable == "true":
-        return b""
+        return b"", 0
     if executable == "false":
-        return b""
+        return b"", 1
 
-    return b""
+    return b"", 127
 
 
 def execute_session_command(session: SSHSession, command: str) -> tuple[bytes, bool]:
@@ -731,64 +814,89 @@ def execute_session_command(session: SSHSession, command: str) -> tuple[bytes, b
     Supports top-level chaining (``cmd1 && cmd2``, ``cmd1 || cmd2``,
     ``cmd1 ; cmd2``) and pipelines (``cat f | grep x | wc -l``).
     """
+    out, should_close, _ = _execute_session_command_with_status(session, command, record=True)
+    return out, should_close
+
+
+def _execute_session_command_with_status(
+    session: SSHSession, command: str, record: bool = True
+) -> tuple[bytes, bool, int]:
     command = command.strip()
 
-    # Validate command length to prevent buffer overflow attacks
+    # Validate command length to prevent memory/buffer exhaustion
     if len(command) > settings.max_command_length:
-        return b"bash: command line too long\r\n", False
+        return b"bash: command line too long\r\n", False, 1
 
-    session.add_command(command)
+    if record:
+        session.add_command(command)
 
     segments, operators = _split_chains(command)
     collected = b""
+    last_status = 0
     for idx, segment in enumerate(segments):
         segment = segment.strip()
         if not segment:
             continue
         if idx > 0:
-            failed = output_indicates_failure(collected)
-            if operators[idx - 1] == "&&" and failed:
-                break
-            if operators[idx - 1] == "||" and not failed:
-                break
-        chunk, should_close = _run_pipeline(session, segment)
+            op = operators[idx - 1]
+            if op == "&&" and last_status != 0:
+                continue
+            if op == "||" and last_status == 0:
+                continue
+        chunk, should_close, seg_status = _run_pipeline_with_status(session, segment)
         collected += chunk
+        last_status = seg_status
         if should_close:
-            session.last_exit_code = _exit_status_for(chunk)
-            if session.commands:
-                session.commands[-1]["exit_code"] = session.last_exit_code
-            return collected, True
-    session.last_exit_code = _exit_status_for(collected)
-    if session.commands:
-        session.commands[-1]["exit_code"] = session.last_exit_code
-    return collected, False
+            session.set_last_command_exit_code(last_status)
+            return collected, True, last_status
+    session.set_last_command_exit_code(last_status)
+    return collected, False, last_status
 
 
 def _run_pipeline(session: SSHSession, segment: str) -> tuple[bytes, bool]:
+    out, should_close, _ = _run_pipeline_with_status(session, segment)
+    return out, should_close
+
+
+def _run_pipeline_with_status(session: SSHSession, segment: str) -> tuple[bytes, bool, int]:
     stages = [stage for stage in _split_pipeline(segment) if stage]
     if not stages:
-        return b"", False
-    result = _dispatch_command(session, stages[0], piped=len(stages) > 1)
-    # Guard against a handler accidentally returning only bytes (or None)
-    # instead of a ``(output, should_close)`` tuple.
-    if isinstance(result, tuple):
-        output, should_close = result
-    else:
-        output, should_close = (result or b""), False
+        return b"", False, 0
+    output, should_close, exit_code = _dispatch_command_with_status(session, stages[0], piped=len(stages) > 1)
     for stage in stages[1:]:
-        output = _apply_stdin_filter(session, stage, output)
-    return output, should_close
+        output, exit_code = _apply_stdin_filter_with_status(session, stage, output)
+    return output, should_close, exit_code
 
 
 def _dispatch_command(session: SSHSession, command: str, piped: bool = False) -> tuple[bytes, bool]:
     """Execute a single (pipe-free) command against the session VFS."""
+    out, should_close, _ = _dispatch_command_with_status(session, command, piped=piped)
+    return out, should_close
+
+
+def _dispatch_command_with_status(
+    session: SSHSession, command: str, piped: bool = False
+) -> tuple[bytes, bool, int]:
+    """Execute a single (pipe-free) command and return ``(output, should_close, exit_code)``."""
+    res = _dispatch_command_core(session, command, piped=piped)
+    if len(res) == 3:
+        return res  # type: ignore[return-value]
+    out, should_close = res  # type: ignore[misc]
+    return out, should_close, _exit_status_for(out)
+
+
+def _dispatch_command_core(
+    session: SSHSession, command: str, piped: bool = False
+) -> tuple[bytes, bool, int] | tuple[bytes, bool]:
+    """Internal dispatcher returning ``(output, should_close[, exit_code])``."""
+    expanded_cmd = _expand_vars_unquoted(command, session)
     try:
-        parts = shlex.split(command, posix=True) if command else []
+        parts = shlex.split(expanded_cmd, posix=True) if expanded_cmd else []
     except ValueError:
-        parts = command.split()
+        parts = expanded_cmd.split()
 
     if not parts:
-        return b"", False
+        return b"", False, 0
 
     if parts[0] in _ALIASES:
         parts = _ALIASES[parts[0]].split() + parts[1:]
@@ -1053,8 +1161,9 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
 
     if executable == "cat":
         if not args:
-            return b"", False
+            return b"", False, 0
         results = []
+        had_error = False
         for target in args:
             if target.startswith("-"):
                 continue
@@ -1065,70 +1174,56 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
                     results.append(content.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\n", "\r\n"))
             elif session.vfs.is_dir(target_path):
                 results.append(f"cat: {target}: Is a directory\r\n")
+                had_error = True
             else:
                 results.append(f"cat: {target}: No such file or directory\r\n")
-        return "".join(results).encode(), False
+                had_error = True
+        return "".join(results).encode(), False, (1 if had_error else 0)
 
     if executable == "less" or executable == "more":
         if not args:
-            return b"", False
+            return b"", False, 0
         target_path = session.vfs._normalize_path(session.cwd, args[-1])
         content = session.vfs.read_file(target_path)
         if content is None:
-            return f"{executable}: {args[-1]}: No such file or directory\r\n".encode(), False
-        return content.replace(b"\n", b"\r\n"), False
+            return f"{executable}: {args[-1]}: No such file or directory\r\n".encode(), False, 1
+        return content.replace(b"\n", b"\r\n"), False, 0
 
-    if executable == "grep":
-        if len(args) < 1:
-            return b"grep: missing pattern operand\r\n", False
-        flags = [a for a in args if a.startswith("-")]
-        non_flags = [a for a in args if not a.startswith("-")]
-        if not non_flags:
-            return b"grep: missing pattern operand\r\n", False
-        pattern = non_flags[0]
-        files = non_flags[1:]
-        results = []
-        for fname in files:
-            fpath = session.vfs._normalize_path(session.cwd, fname)
-            matches = session.vfs.grep(pattern, fpath)
-            if len(files) > 1:
-                results.extend([f"{fname}:{line}" for line in matches])
-            else:
-                results.extend(matches)
-        if not results:
-            return b"", False
-        return ("\r\n".join(results) + "\r\n").encode(), False
+    if executable in {"grep", "egrep", "fgrep"}:
+        out, code = _apply_stdin_filter_with_status(session, expanded_cmd, b"")
+        return out, False, code
 
     if executable == "find":
         root = args[0] if args and not args[0].startswith("-") else session.cwd
         root = session.vfs._normalize_path(session.cwd, root)
+        if not session.vfs.exists(root):
+            return f"find: '{root}': No such file or directory\r\n".encode(), False, 1
         name = None
         for i, a in enumerate(args):
             if a == "-name" and i + 1 < len(args):
                 name = args[i + 1].strip("*").strip("'\"")
         results = session.vfs.find(root, name)
-        return ("\r\n".join(results) + "\r\n").encode() if results else b"", False
+        return ("\r\n".join(results) + "\r\n").encode() if results else b"", False, 0
 
     if executable == "touch":
-        if not args:
-            return b"touch: missing file operand\r\n", False
-        for target in args:
-            if target.startswith("-"):
-                continue
+        if not operands:
+            return b"touch: missing file operand\r\n", False, 1
+        for target in operands:
             target_path = session.vfs._normalize_path(session.cwd, target)
-            session.vfs.write_file(target_path, b"")
-        return b"", False
+            if not session.vfs.touch(target_path):
+                return f"touch: cannot touch '{target}': No such file or directory\r\n".encode(), False, 1
+        return b"", False, 0
 
     if executable == "mkdir":
-        if not args:
-            return b"mkdir: missing operand\r\n", False
-        for target in args:
-            if target.startswith("-"):
-                continue
+        if not operands:
+            return b"mkdir: missing operand\r\n", False, 1
+        parents = any("p" in f for f in flags)
+        for target in operands:
             target_path = session.vfs._normalize_path(session.cwd, target)
-            if not session.vfs.mkdir(target_path):
-                return f"mkdir: cannot create directory '{target}': File exists or parent directory missing\r\n".encode(), False
-        return b"", False
+            ok = session.vfs.mkdir_p(target_path) if parents else session.vfs.mkdir(target_path)
+            if not ok:
+                return f"mkdir: cannot create directory '{target}': File exists or parent directory missing\r\n".encode(), False, 1
+        return b"", False, 0
 
     if executable == "rm":
         recursive = False
@@ -1143,76 +1238,84 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             else:
                 targets.append(target)
         if not targets:
-            return (b"" if force else b"rm: missing operand\r\n"), False
+            return (b"" if force else b"rm: missing operand\r\n"), False, (0 if force else 1)
         for target in targets:
             target_path = session.vfs._normalize_path(session.cwd, target)
-            if session.vfs.is_file(target_path):
+            if session.vfs.is_symlink(target_path) or session.vfs.is_file(target_path):
                 session.vfs.rm(target_path)
             elif session.vfs.is_dir(target_path):
                 if recursive:
                     session.vfs.remove_tree(target_path)
                 else:
-                    return f"rm: cannot remove '{target}': Is a directory\r\n".encode(), False
+                    return f"rm: cannot remove '{target}': Is a directory\r\n".encode(), False, 1
             elif not force:
-                return f"rm: cannot remove '{target}': No such file or directory\r\n".encode(), False
-        return b"", False
+                return f"rm: cannot remove '{target}': No such file or directory\r\n".encode(), False, 1
+        return b"", False, 0
 
     if executable == "rmdir":
-        if not args:
-            return b"rmdir: missing operand\r\n", False
-        for target in args:
+        if not operands:
+            return b"rmdir: missing operand\r\n", False, 1
+        for target in operands:
             target_path = session.vfs._normalize_path(session.cwd, target)
             if not session.vfs.rmdir(target_path):
-                return f"rmdir: failed to remove '{target}': Directory not empty or does not exist\r\n".encode(), False
-        return b"", False
+                return f"rmdir: failed to remove '{target}': Directory not empty or does not exist\r\n".encode(), False, 1
+        return b"", False, 0
 
     if executable == "echo":
-        raw_cmd = command[5:].strip() if len(command) > 4 else ""
-        if ">>" in raw_cmd:
-            content_part, file_part = raw_cmd.split(">>", 1)
-            append = True
-        elif ">" in raw_cmd:
-            content_part, file_part = raw_cmd.split(">", 1)
-            append = False
+        raw_cmd = expanded_cmd.strip()[4:].strip()
+        redir_segs, redir_ops = _split_outside_quotes(raw_cmd, (">>", ">"))
+        if redir_ops:
+            content_part = redir_segs[0].strip()
+            file_part = redir_segs[-1].strip()
+            append = redir_ops[-1] == ">>"
         else:
             content_part = raw_cmd
             file_part = ""
             append = False
 
-        content_part = content_part.strip()
+        no_newline = False
+        if content_part == "-n":
+            no_newline = True
+            content_part = ""
+        elif content_part.startswith("-n "):
+            no_newline = True
+            content_part = content_part[3:].strip()
+
         quoted_single = content_part.startswith("'") and content_part.endswith("'") and len(content_part) >= 2
-        if (content_part.startswith('"') and content_part.endswith('"')) or quoted_single:
+        if (content_part.startswith('"') and content_part.endswith('"') and len(content_part) >= 2) or quoted_single:
             content_part = content_part[1:-1]
-        if not quoted_single:
-            content_part = _expand_vars(content_part, session)
 
         if file_part:
-            file_name = _expand_vars(file_part.strip().strip('"').strip("'"), session)
+            file_name = file_part.strip().strip('"').strip("'")
             target_path = session.vfs._normalize_path(session.cwd, file_name)
-            existing = b""
-            if append and session.vfs.is_file(target_path):
-                existing = session.vfs.read_file(target_path) or b""
-            new_content = existing + content_part.encode() + b"\n"
-            if session.vfs.write_file(target_path, new_content):
-                return b"", False
+            payload_bytes = content_part.encode() + (b"" if no_newline else b"\n")
+            if append:
+                ok = session.vfs.append_file(target_path, payload_bytes)
             else:
-                return f"bash: {file_name}: No such file or directory or target is a directory\r\n".encode(), False
-        else:
-            return f"{content_part}\r\n".encode(), False
+                ok = session.vfs.write_file(target_path, payload_bytes)
+            if ok:
+                return b"", False, 0
+            return f"bash: {file_name}: No such file or directory or target is a directory\r\n".encode(), False, 1
+        suffix = "" if no_newline else "\r\n"
+        return f"{content_part}{suffix}".encode(), False, 0
 
     if executable == "stat":
-        if not args:
-            return b"stat: missing operand\r\n", False
-        target = args[0]
+        if not operands:
+            return b"stat: missing operand\r\n", False, 1
+        target = operands[0]
         target_path = session.vfs._normalize_path(session.cwd, target)
         info = session.vfs.stat(target_path)
         if not info:
-            return f"stat: cannot statx '{target}': No such file or directory\r\n".encode(), False
+            return f"stat: cannot statx '{target}': No such file or directory\r\n".encode(), False, 1
+        uid = info.get("uid", 0)
+        gid = info.get("gid", 0)
+        owner = info.get("owner", "root")
+        group = info.get("group", "root")
         return (
             f"  File: {info['name']}\r\n"
             f"  Size: {info['size']}\tBlocks: 8          IO Block: 4096   {info['type']}\r\n"
-            f"Access: ({info['mode']})  Uid: (    0/    root)   Gid: (    0/    root)\r\n"
-        ).encode(), False
+            f"Access: ({info['mode']})  Uid: ({uid:5d}/{owner:>8s})   Gid: ({gid:5d}/{group:>8s})\r\n"
+        ).encode(), False, 0
 
     if executable == "cp":
         if len(args) < 2:
@@ -1258,7 +1361,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         content = session.vfs.read_file(target_path)
         if content is None:
             return f"head: cannot open '{target}' for reading: No such file or directory\r\n".encode(), False
-        return ("\r\n".join(content.decode("utf-8", errors="replace").splitlines()[:count]) + "\r\n").encode(), False
+        return ("\r\n".join(content.decode("utf-8", errors="replace").splitlines()[:count]) + "\r\n").encode(), False, 0
 
     if executable == "tail":
         count = 10
@@ -1284,20 +1387,23 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
                 files.append(arg)
             i += 1
         if not files:
-            return b"tail: missing file operand\r\n", False
+            return b"tail: missing file operand\r\n", False, 1
         target = files[-1]
         target_path = session.vfs._normalize_path(session.cwd, target)
         content = session.vfs.read_file(target_path)
         if content is None:
-            return f"tail: cannot open '{target}' for reading: No such file or directory\r\n".encode(), False
+            return f"tail: cannot open '{target}' for reading: No such file or directory\r\n".encode(), False, 1
         all_lines = content.decode("utf-8", errors="replace").splitlines()
         selected = all_lines[-count:] if count > 0 else []
-        return ("\r\n".join(selected) + "\r\n").encode() if selected else b"", False
+        return ("\r\n".join(selected) + "\r\n").encode() if selected else b"", False, 0
 
     if executable in {"wget", "curl"}:
-        url = _expand_vars(next((a for a in args if not a.startswith("-")), "index.html"), session)
-        filename = url.split("/")[-1] if "/" in url else "index.html"
-        if not filename or filename.startswith("-"):
+        url = next((a for a in args if not a.startswith("-")), "index.html")
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        host_part = parsed_url.hostname or url.split("/")[0] or "unknown"
+        url_path = parsed_url.path or "/"
+        filename = url_path.rstrip("/").split("/")[-1] or "index.html"
+        if filename.startswith("-"):
             filename = "index.html"
         target_path = session.vfs._normalize_path(session.cwd, filename)
         fake_payload = (
@@ -1310,23 +1416,23 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         if executable == "wget":
             return (
                 f"--2026-06-28 14:01:10--  {url}\r\n"
-                f"Resolving {url.split('/')[2] if '//' in url else url}... 203.0.113.99\r\n"
-                f"Connecting to {url.split('/')[2] if '//' in url else url}:80... connected.\r\n"
+                f"Resolving {host_part}... 203.0.113.99\r\n"
+                f"Connecting to {host_part}:{parsed_url.port or 80}... connected.\r\n"
                 f"HTTP request sent, awaiting response... 200 OK\r\n"
                 f"Length: {len(fake_payload)} [text/x-sh]\r\n"
                 f"Saving to: '{filename}'\r\n\r\n"
                 f"100%[============================>] {len(fake_payload)}  --.-KB/s    in 0s\r\n\r\n"
                 f"2026-06-28 14:01:11 (512 KB/s) - '{filename}' saved [{len(fake_payload)}/{len(fake_payload)}]\r\n"
-            ).encode(), False
+            ).encode(), False, 0
         else:
-            return fake_payload, False
+            return fake_payload, False, 0
 
     if executable == "ping":
         if not args:
-            return b"ping: missing host operand\r\n", False
+            return b"ping: missing host operand\r\n", False, 1
         host = next((a for a in args if not a.startswith("-")), "")
         if not host:
-            return b"ping: missing host operand\r\n", False
+            return b"ping: missing host operand\r\n", False, 1
         return (
             f"PING {host} ({host}) 56(84) bytes of data.\r\n"
             f"64 bytes from {host}: icmp_seq=1 ttl=64 time=0.032 ms\r\n"
@@ -1335,7 +1441,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             f"\r\n--- {host} ping statistics ---\r\n"
             f"3 packets transmitted, 3 received, 0% packet loss, time 2004ms\r\n"
             f"rtt min/avg/max/mdev = 0.029/0.035/0.045/0.007 ms\r\n"
-        ).encode(), False
+        ).encode(), False, 0
 
     if executable == "nmap":
         host = next((a for a in args if not a.startswith("-")), "localhost")
@@ -1350,7 +1456,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             f"443/tcp  open  https\r\n"
             f"3306/tcp open  mysql\r\n"
             f"Nmap done: 1 IP address (1 host up) scanned in 0.04 seconds\r\n"
-        ).encode(), False
+        ).encode(), False, 0
 
     if executable in {"vi", "vim", "nano"}:
         if not args:
@@ -1364,14 +1470,37 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         return f'"{fname}" [New File]\r\n'.encode(), False
 
     if executable == "chmod":
-        if not args:
-            return b"chmod: missing operand\r\n", False
-        return b"", False  # Silent success for honeypot
+        if len(operands) < 2:
+            return b"chmod: missing operand\r\n", False, 1
+        mode_spec = operands[0]
+        recursive = any("R" in f or "r" in f for f in flags)
+        for target in operands[1:]:
+            path = session.vfs._normalize_path(session.cwd, target)
+            if not session.vfs.chmod(path, mode_spec):
+                return f"chmod: cannot access '{target}': No such file or directory\r\n".encode(), False, 1
+            if recursive and session.vfs.is_dir(path):
+                prefix = "/" if path == "/" else path + "/"
+                for child in list(session.vfs.fs.keys()):
+                    if child.startswith(prefix):
+                        session.vfs.chmod(child, mode_spec)
+        return b"", False, 0
 
     if executable == "chown":
-        if not args:
-            return b"chown: missing operand\r\n", False
-        return b"", False  # Silent success for honeypot
+        if len(operands) < 2:
+            return b"chown: missing operand\r\n", False, 1
+        owner_spec = operands[0]
+        owner, _, group = owner_spec.partition(":")
+        recursive = any("R" in f or "r" in f for f in flags)
+        for target in operands[1:]:
+            path = session.vfs._normalize_path(session.cwd, target)
+            if not session.vfs.chown(path, owner or "root", group or None):
+                return f"chown: cannot access '{target}': No such file or directory\r\n".encode(), False, 1
+            if recursive and session.vfs.is_dir(path):
+                prefix = "/" if path == "/" else path + "/"
+                for child in list(session.vfs.fs.keys()):
+                    if child.startswith(prefix):
+                        session.vfs.chown(child, owner or "root", group or None)
+        return b"", False, 0
 
     if executable == "useradd":
         if not args:
@@ -1493,13 +1622,11 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         return b"", False
 
     if executable in {"awk", "gawk", "sed"}:
-        # Route through the shared filter so the program is actually applied
-        # (e.g. ``awk '{print $1}' /etc/passwd`` extracts the column instead of
-        # echoing the whole file back).
-        return _apply_stdin_filter(session, command, b""), False
+        out, code = _apply_stdin_filter_with_status(session, command, b"")
+        return out, False, code
 
     if executable in {"nc", "netcat", "ncat", "socat"}:
-        return b"Ncat: Connection refused.\r\n", False
+        return b"Ncat: Connection refused.\r\n", False, 1
 
     # ── DNS / recon / hardware enumeration (v2.3.0) ─────────────────────────
 
@@ -1554,13 +1681,13 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         root = operands[0] if operands else session.cwd
         root_path = session.vfs._normalize_path(session.cwd, root)
         if not session.vfs.exists(root_path):
-            return f"tree: {root}: No such file or directory\r\n".encode(), False
+            return f"tree: {root}: No such file or directory\r\n".encode(), False, 1
         rendered = session.vfs.tree(root_path, max_depth=3)
-        return rendered.replace("\n", "\r\n").encode() + b"\r\n", False
+        return rendered.replace("\n", "\r\n").encode() + b"\r\n", False, 0
 
     if executable == "dmesg":
         if "--help" in args:
-            return b"Usage: dmesg [-c] [-r] [-n LEVEL] [-s SIZE]\r\n", False
+            return b"Usage: dmesg [-c] [-r] [-n LEVEL] [-s SIZE]\r\n", False, 0
         return (
             b"[    0.000000] Linux version 5.15.0-94-generic (buildd@lcy02-amd64) (gcc 11.4.0) #104-Ubuntu SMP\r\n"
             b"[    0.434201] ACPI: Early table checksum verification disabled\r\n"
@@ -1570,7 +1697,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
             b"[    2.104558] systemd[1]: Detected virtualization kvm.\r\n"
             b"[    2.309882] systemd[1]: Reached target Multi-User System.\r\n"
             b"[   47.881201] sshd[987]: Accepted password for root from 203.0.113.24 port 51234 ssh2\r\n"
-        ), False
+        ), False, 0
 
     if executable == "lsusb":
         return (
@@ -1682,22 +1809,31 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
         ), False
 
     if executable == "ln":
-        if len(args) < 2:
-            return b"ln: missing file operand\r\n", False
-        source = session.vfs._normalize_path(session.cwd, args[-2])
-        destination = session.vfs._normalize_path(session.cwd, args[-1])
+        if len(operands) < 2:
+            return b"ln: missing file operand\r\n", False, 1
+        symbolic = any("s" in f for f in flags)
+        destination = session.vfs._normalize_path(session.cwd, operands[-1])
+        if symbolic:
+            if not session.vfs.symlink(operands[-2], destination):
+                return f"ln: failed to create symbolic link '{operands[-1]}'\r\n".encode(), False, 1
+            return b"", False, 0
+        source = session.vfs._normalize_path(session.cwd, operands[-2])
         content = session.vfs.read_file(source)
         if content is None:
-            return f"ln: failed to access '{args[-2]}': No such file or directory\r\n".encode(), False
+            return f"ln: failed to access '{operands[-2]}': No such file or directory\r\n".encode(), False, 1
         session.vfs.write_file(destination, content)
-        return b"", False
+        return b"", False, 0
 
     if executable == "file":
         if not operands:
-            return b"file: missing operand\r\n", False
+            return b"file: missing operand\r\n", False, 1
         results = []
         for target in operands:
             path = session.vfs._normalize_path(session.cwd, target)
+            if session.vfs.is_symlink(path):
+                link_t = session.vfs.readlink(path) or ""
+                results.append(f"{target}: symbolic link to {link_t}")
+                continue
             content = session.vfs.read_file(path)
             if content is None:
                 if session.vfs.is_dir(path):
@@ -1710,74 +1846,117 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
                 results.append(f"{target}: Bourne-Again shell script, ASCII text executable")
             else:
                 results.append(f"{target}: ASCII text")
-        return ("\r\n".join(results) + "\r\n").encode(), False
+        return ("\r\n".join(results) + "\r\n").encode(), False, 0
 
     if executable in {"readlink", "realpath"}:
         if not operands:
-            return f"{executable}: missing operand\r\n".encode(), False
-        return f"{session.vfs._normalize_path(session.cwd, operands[0])}\r\n".encode(), False
+            return f"{executable}: missing operand\r\n".encode(), False, 1
+        target_path = session.vfs._normalize_path(session.cwd, operands[0])
+        if executable == "readlink" and "-f" not in flags:
+            link_target = session.vfs.readlink(target_path)
+            if link_target is None:
+                return b"", False, 1
+            return f"{link_target}\r\n".encode(), False, 0
+        resolved = session.vfs.resolve_path(target_path)
+        return f"{resolved}\r\n".encode(), False, 0
 
     if executable in {"basename", "dirname"}:
         if not operands:
-            return f"{executable}: missing operand\r\n".encode(), False
+            return f"{executable}: missing operand\r\n".encode(), False, 1
         value = operands[0].rstrip("/")
         if executable == "basename":
-            return f"{value.split('/')[-1] or '/'}\r\n".encode(), False
+            return f"{value.split('/')[-1] or '/'}\r\n".encode(), False, 0
         parent = "/".join(value.split("/")[:-1])
-        return f"{parent or '/'}\r\n".encode(), False
+        return f"{parent or '/'}\r\n".encode(), False, 0
 
     if executable == "tty":
-        return b"/dev/pts/0\r\n", False
+        return b"/dev/pts/0\r\n", False, 0
 
     if executable == "stty":
-        return b"speed 38400 baud; rows 44; columns 160; line = 0;\r\n", False
+        return b"speed 38400 baud; rows 44; columns 160; line = 0;\r\n", False, 0
 
     # ── Text processing standalone ──────────────────────────────────────────
 
     if executable in {"sort", "uniq", "cut", "tr", "xargs", "tac"}:
-        return _apply_stdin_filter(session, command, b""), False
+        out, code = _apply_stdin_filter_with_status(session, expanded_cmd, b"")
+        return out, False, code
 
     if executable == "seq":
         try:
             values = [int(a) for a in operands]
         except ValueError:
-            return b"seq: invalid integer argument\r\n", False
+            return b"seq: invalid integer argument\r\n", False, 1
         if len(values) == 1:
             start, stop = 1, values[0]
         elif len(values) >= 2:
             start, stop = values[0], values[1]
         else:
-            return b"seq: missing operand\r\n", False
+            return b"seq: missing operand\r\n", False, 1
         numbers = list(range(start, stop + 1))[:1000]
-        return ("\r\n".join(str(n) for n in numbers) + "\r\n").encode() if numbers else b"", False
+        return ("\r\n".join(str(n) for n in numbers) + "\r\n").encode() if numbers else b"", False, 0
 
     if executable == "printf":
-        raw = command[len(executable):].strip()
-        expanded = _expand_vars(raw, session)
+        raw = expanded_cmd[len(executable):].strip()
         try:
-            pieces = shlex.split(expanded)
+            pieces = shlex.split(raw)
         except ValueError:
-            pieces = [expanded.strip('"\'')]
+            pieces = [raw.strip('"\'')]
         fmt = pieces[0] if pieces else ""
         rendered = fmt.replace("\\n", "\n").replace("%s", "{}")
         for value in pieces[1:]:
             rendered = rendered.replace("{}", str(value), 1)
         rendered = re.sub(r"%s|%d", "", rendered).replace("{}", "")
         out = rendered.replace("\n", "\r\n")
-        return (out + ("\r\n" if not out.endswith("\n") else "")).encode(), False
+        return (out + ("\r\n" if not out.endswith("\n") else "")).encode(), False, 0
 
     if executable == "sleep":
-        return b"", False
+        return b"", False, 0
 
     if executable == "yes":
         text = operands[0] if operands else "y"
-        return ("\r\n".join([text] * 10) + "\r\n").encode(), False
+        return ("\r\n".join([text] * 10) + "\r\n").encode(), False, 0
 
     if executable in {"test", "["}:
-        return b"", False
+        expr = list(args)
+        if executable == "[" and expr and expr[-1] == "]":
+            expr = expr[:-1]
+        negate = False
+        if expr and expr[0] == "!":
+            negate = True
+            expr = expr[1:]
+        cond = False
+        if len(expr) == 1:
+            cond = bool(expr[0])
+        elif len(expr) == 2:
+            op, val = expr
+            p = session.vfs._normalize_path(session.cwd, val)
+            if op == "-f":
+                cond = session.vfs.is_file(p)
+            elif op == "-d":
+                cond = session.vfs.is_dir(p)
+            elif op == "-e":
+                cond = session.vfs.exists(p)
+            elif op == "-L":
+                cond = session.vfs.is_symlink(p)
+            elif op == "-z":
+                cond = len(val) == 0
+            elif op == "-n":
+                cond = len(val) > 0
+        elif len(expr) == 3:
+            lhs, op, rhs = expr
+            if op in ("=", "=="):
+                cond = lhs == rhs
+            elif op == "!=":
+                cond = lhs != rhs
+        if negate:
+            cond = not cond
+        return b"", False, (0 if cond else 1)
+
+    if executable == "false":
+        return b"", False, 1
 
     if executable in {"true", ":"}:
-        return b"", False
+        return b"", False, 0
 
     # ── Shell builtins ──────────────────────────────────────────────────────
 
@@ -1862,9 +2041,9 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
     if executable == "journalctl":
         content = session.vfs.read_file("/var/log/auth.log")
         if content is None:
-            return b"-- No entries --\r\n", False
+            return b"-- No entries --\r\n", False, 0
         header = b"-- Logs begin at Mon 2026-06-01 00:00:01 UTC. --\r\n"
-        return header + content.replace(b"\n", b"\r\n"), False
+        return header + content.replace(b"\n", b"\r\n"), False, 0
 
     if executable in {"hostnamectl", "timedatectl", "localectl"}:
         if executable == "hostnamectl":
@@ -2197,7 +2376,7 @@ def _dispatch_command(session: SSHSession, command: str, piped: bool = False) ->
                     return ("\r\n".join(output_lines) + "\r\n").encode(), False
                 return b"", False
 
-    return f"bash: {executable}: command not found\r\n".encode(), False
+    return f"bash: {executable}: command not found\r\n".encode(), False, 127
 
 
 def _exit_status_for(output: bytes) -> int:
@@ -2289,12 +2468,12 @@ def _redraw_line(channel: paramiko.Channel, session: SSHSession, buffer: str) ->
 def _run_exec(channel: paramiko.Channel, session: SSHSession, command: str) -> None:
     _log_from_thread(session.src_ip, "command", {"command": command, "mode": "exec", "session_id": session.session_id})
     try:
-        response, _ = execute_session_command(session, command)
+        response, _, exit_code = _execute_session_command_with_status(session, command, record=True)
     except Exception:
         logger.exception("error executing %r", command)
-        response, _ = b"bash: internal error\r\n", False
+        response, exit_code = b"bash: internal error\r\n", 1
     channel.send(response)
-    channel.send_exit_status(_exit_status_for(response))
+    channel.send_exit_status(exit_code)
     try:
         channel.shutdown_write()
     except Exception:
@@ -2308,6 +2487,11 @@ def handle_ssh_client(client: socket.socket, addr: tuple[str, int]) -> None:
     if is_blocked(ip) or is_rate_limited(ip, "SSH"):
         client.close()
         return
+
+    try:
+        client.settimeout(30.0)
+    except OSError:
+        pass
 
     transport = paramiko.Transport(client)
     transport.local_version = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.7"
@@ -2365,15 +2549,31 @@ def handle_ssh_client(client: socket.socket, addr: tuple[str, int]) -> None:
 
 
 def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
+    try:
+        channel.settimeout(max(30.0, float(settings.ssh_channel_timeout) * 10.0))
+    except Exception:
+        pass
+
     channel.send(WELCOME)
     channel.send(make_prompt(session.cwd, session.username))
     buffer = ""
     history = ShellHistory([c["command"] for c in session.commands])
+    decoder = codecs.getincrementaldecoder("utf-8")("ignore")
+    max_len = max(128, int(getattr(settings, "max_command_length", 4096)))
+
     while True:
-        char = channel.recv(1)
+        if is_blocked(session.src_ip):
+            break
+        try:
+            char = channel.recv(1)
+        except TimeoutError:
+            break
+        except socket.timeout:
+            break
         if not char:
             break
         if char in {b"\r", b"\n"}:
+            decoder.reset()
             command = buffer.strip()
             channel.send(b"\r\n")
             if command:
@@ -2391,10 +2591,12 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
             history = ShellHistory([c["command"] for c in session.commands])
             channel.send(make_prompt(session.cwd, session.username))
         elif char == b"\x7f":  # Backspace
+            decoder.reset()
             if buffer:
                 buffer = buffer[:-1]
                 channel.send(b"\b \b")
         elif char == b"\x03":  # Ctrl+C
+            decoder.reset()
             buffer = ""
             history = ShellHistory([c["command"] for c in session.commands])
             channel.send(b"^C\r\n")
@@ -2403,6 +2605,7 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
             channel.send(b"logout\r\n")
             break
         elif char == b"\t":  # Tab completion
+            decoder.reset()
             try:
                 completed, candidates = complete_input(session, buffer)
             except Exception:
@@ -2416,7 +2619,8 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
                 column_block = "  ".join(names[:40])
                 channel.send(b"\r\n" + column_block.encode() + b"\r\n")
                 _redraw_line(channel, session, buffer)
-        elif char == b"\x1b":  # Escape sequence (arrow keys)
+        elif char == b"\x1b":  # Escape sequence (arrow keys / CSI)
+            decoder.reset()
             seq = channel.recv(2)
             if seq in (b"[A", b"OA"):  # Up arrow
                 prev_cmd = history.up(buffer)
@@ -2428,11 +2632,14 @@ def _run_shell(channel: paramiko.Channel, session: SSHSession) -> None:
                 if next_cmd is not None:
                     buffer = next_cmd
                     _redraw_line(channel, session, buffer)
-            elif seq[0:1] == b"[" and len(seq) >= 1:
-                pass  # Ignore other escape sequences (left/right/home/end)
+            elif seq.startswith(b"[") and (len(seq) < 2 or not (0x40 <= seq[1] <= 0x7E)):
+                for _ in range(16):
+                    nxt = channel.recv(1)
+                    if not nxt or (0x40 <= nxt[0] <= 0x7E):
+                        break
         else:
-            decoded = char.decode("utf-8", errors="ignore")
-            if decoded:
+            decoded = decoder.decode(char)
+            if decoded and len(buffer) + len(decoded) <= max_len:
                 buffer += decoded
                 channel.send(char)
 
@@ -2448,10 +2655,25 @@ def start_ssh_server(host: str = "0.0.0.0", port: int = 2222) -> None:
         logger.warning(f"Could not bind SSH honeypot socket on {host}:{port}: {exc}")
         return
 
+    sem = threading.BoundedSemaphore(max(20, int(getattr(settings, "max_sessions", 1000))))
+
+    def _serve(client_sock: socket.socket, client_addr: tuple[str, int]) -> None:
+        try:
+            handle_ssh_client(client_sock, client_addr)
+        finally:
+            sem.release()
+
     try:
         while True:
             client, addr = sock.accept()
-            thread = threading.Thread(target=handle_ssh_client, args=(client, addr), daemon=True)
+            if not sem.acquire(blocking=False):
+                logger.warning("SSH concurrent connection limit reached — dropping %s", addr[0])
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
+            thread = threading.Thread(target=_serve, args=(client, addr), daemon=True)
             thread.start()
     except Exception as exc:
         logger.warning(f"SSH listener loop encountered error: {exc}")

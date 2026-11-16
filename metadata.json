@@ -1,6 +1,6 @@
 {
-  "name": "BaitBox Honeypot",
-  "description": "Zero-config multi-protocol honeypot with real-time attack detection and cyber command center dashboard",
+  "name": "BaitBox",
+  "description": "Zero-config multi-protocol honeypot (SSH, Telnet, HTTP) with stateful VFS shell, MITRE ATT&CK telemetry, and live command-center dashboard.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

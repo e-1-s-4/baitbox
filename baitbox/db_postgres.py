@@ -1,6 +1,7 @@
 """PostgreSQL persistence implementation for BaitBox."""
 
 from __future__ import annotations
+import asyncio
 import datetime as dt
 import json
 import time
@@ -13,15 +14,26 @@ from .config import settings
 class PostgresDB:
     def __init__(self) -> None:
         self._pool: asyncpg.Pool | None = None
+        self._pool_lock: asyncio.Lock | None = None
+        self._pool_lock_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._pool_lock is None or self._pool_lock_loop is not loop:
+            self._pool_lock = asyncio.Lock()
+            self._pool_lock_loop = loop
+        return self._pool_lock
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(
-                settings.database_url,
-                min_size=2,
-                max_size=10,
-                command_timeout=30,
-            )
+            async with self._get_lock():
+                if self._pool is None:
+                    self._pool = await asyncpg.create_pool(
+                        settings.database_url,
+                        min_size=2,
+                        max_size=10,
+                        command_timeout=30,
+                    )
         return self._pool
 
     async def init_db(self) -> None:
@@ -315,12 +327,12 @@ class PostgresDB:
                 """
                 WITH removed AS (
                     DELETE FROM events
-                    WHERE timestamp < NOW() - ($1 || ' hours')::INTERVAL
+                    WHERE timestamp < NOW() - make_interval(hours => $1)
                     RETURNING 1
                 )
                 SELECT COUNT(*) FROM removed
                 """,
-                str(retention_hours),
+                int(retention_hours),
             )
             await conn.execute("DELETE FROM geoip_cache WHERE expires_at <= $1", time.time())
             return int(deleted or 0)

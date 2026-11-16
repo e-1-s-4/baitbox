@@ -10,10 +10,12 @@ import json
 import logging
 import queue
 import threading
+import time
 import urllib.request
 from typing import Any
 
 from .config import settings
+from .telemetry import validate_webhook_url
 
 logger = logging.getLogger("baitbox.webhooks")
 
@@ -63,11 +65,17 @@ def _worker_loop() -> None:
 
 
 def send_webhook_notification(event: dict[str, Any]) -> None:
-    if not settings.webhook_url:
+    url = getattr(settings, "webhook_url", "")
+    if not url:
+        return
+    try:
+        validate_webhook_url(url)
+    except ValueError as exc:
+        logger.warning("Ignoring invalid webhook URL: %s", exc)
         return
 
     # Respect the configured minimum threat level (default: notify for all)
-    minimum = settings.webhook_min_threat_level.upper()
+    minimum = str(getattr(settings, "webhook_min_threat_level", "LOW")).upper()
     event_level = str(event.get("threat_level") or "LOW").upper()
     if _threat_rank(event_level) < _threat_rank(minimum):
         return
@@ -85,12 +93,15 @@ def send_webhook_notification(event: dict[str, Any]) -> None:
 
 
 def flush_webhooks(timeout: float = 10.0) -> bool:
-    """Block until all queued webhook deliveries completed (used by tests)."""
-    try:
-        _delivery_queue.join()
-        return True
-    except Exception:
-        return False
+    """Block up to ``timeout`` seconds until all queued webhook deliveries complete."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _delivery_queue.all_tasks_done:
+        while _delivery_queue.unfinished_tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _delivery_queue.all_tasks_done.wait(timeout=remaining)
+    return True
 
 
 _TRUNCATION_SUFFIX = "\n…[truncated by BaitBox]"
@@ -104,8 +115,13 @@ def _truncate(text: Any, limit: int) -> str:
 
 
 def _send_webhook_sync(event: dict[str, Any]) -> None:
-    url = settings.webhook_url
-    w_type = settings.webhook_type.lower()
+    url = getattr(settings, "webhook_url", "")
+    try:
+        url = validate_webhook_url(url)
+    except ValueError as exc:
+        logger.warning("Skipping webhook delivery: %s", exc)
+        return
+    w_type = str(getattr(settings, "webhook_type", "discord")).lower()
     
     src_ip = event.get("src_ip", "Unknown")
     protocol = event.get("protocol", "Unknown")
